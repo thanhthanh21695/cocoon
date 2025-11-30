@@ -34,7 +34,7 @@ If you want just to run a worker, please see [readme](../README.md). The followi
 ## Building from Source
 
 ```bash
-git clone --recursive https://github.com/cocoon/cocoon
+git clone --recursive https://github.com/TelegramMessenger/cocoon.git
 cd cocoon
 ```
 
