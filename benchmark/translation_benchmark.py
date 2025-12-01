@@ -572,7 +572,7 @@ def main():
     parser.add_argument('--prompt-format', default='default',
                         choices=['default', 'harmony-lib', 'harmony', 'hunyuan'],
                         help='Prompt format: default (roles), harmony (manual), harmony-lib (library), hunyuan (Hunyuan-MT)')
-    parser.add_argument('--timeout', type=int, default=30,
+    parser.add_argument('--timeout', type=int, default=120,
                         help='Timeout for each request in seconds')
     parser.add_argument('--single-query', action='store_true',
                         help='Translate entire file as single query instead of chunks')
@@ -587,13 +587,25 @@ def main():
                         help='Load generation mode: fixed (N active), qps (fixed rate)')
     parser.add_argument('--qps', type=float,
                         help='Target queries per second (required for --load-mode qps)')
+    parser.add_argument('--query', type=str,
+                        help='Single query text to translate repeatedly (use --max-chunks to limit)')
     
     args = parser.parse_args()
     
     if args.load_mode == 'qps' and args.qps is None:
         parser.error('--qps is required when --load-mode is qps')
     
-    if args.log_file:
+    # Prepare chunks and target languages
+    target_langs = None
+    
+    if args.query:
+        # Use query from command line - create infinite list limited by max_chunks
+        repeat_count = args.max_chunks if args.max_chunks else 1000000  # Default to 1M if not specified
+        print(f"Using query from command line (length: {len(args.query)} chars)")
+        print(f"Repeating query {repeat_count} times (or until stopped)")
+        chunks = [args.query] * repeat_count
+        print(f"  Query length: {len(args.query)} chars")
+    elif args.log_file:
         print(f"Parsing queries from log file: {args.log_file}")
         queries = parse_log_file(args.log_file)
         print(f"Found {len(queries)} queries in log file")
@@ -613,46 +625,31 @@ def main():
         chunk_lengths = [len(c) for c in chunks]
         print(f"  Average text length: {sum(chunk_lengths) / len(chunk_lengths):.0f} chars")
         print(f"  Total characters: {sum(chunk_lengths)}")
-        
-        results = run_benchmark(
-            chunks=chunks,
-            endpoint=args.endpoint,
-            model=args.model,
-            concurrency=args.concurrency,
-            target_lang=args.target_lang,  # fallback, not used since we have target_langs
-            prompt_format=args.prompt_format,
-            timeout=args.timeout,
-            max_chunks=args.max_chunks,
-            stats_interval=args.stats_interval,
-            debug=args.debug,
-            target_langs=target_langs,
-            load_mode=args.load_mode,
-            qps=args.qps
-        )
     else:
         text = download_war_and_peace()
         chunks = split_into_chunks(text, args.chunk_length, args.single_query)
-        
         print(f"\nPrepared {len(chunks)} chunks for translation")
         if len(chunks) > 1:
             chunk_lengths = [len(c) for c in chunks]
             print(f"  Average chunk length: {sum(chunk_lengths) / len(chunk_lengths):.0f} chars")
             print(f"  Total characters: {sum(chunk_lengths)}")
-        
-        results = run_benchmark(
-            chunks=chunks,
-            endpoint=args.endpoint,
-            model=args.model,
-            concurrency=args.concurrency,
-            target_lang=args.target_lang,
-            prompt_format=args.prompt_format,
-            timeout=args.timeout,
-            max_chunks=args.max_chunks,
-            stats_interval=args.stats_interval,
-            debug=args.debug,
-            load_mode=args.load_mode,
-            qps=args.qps
-        )
+    
+    # Run benchmark
+    results = run_benchmark(
+        chunks=chunks,
+        endpoint=args.endpoint,
+        model=args.model,
+        concurrency=args.concurrency,
+        target_lang=args.target_lang,
+        prompt_format=args.prompt_format,
+        timeout=args.timeout,
+        max_chunks=args.max_chunks,
+        stats_interval=args.stats_interval,
+        debug=args.debug,
+        target_langs=target_langs,
+        load_mode=args.load_mode,
+        qps=args.qps
+    )
 
 
 if __name__ == "__main__":
