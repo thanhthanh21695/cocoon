@@ -457,7 +457,8 @@ void ProxyRunner::custom_initialize(td::Promise<td::Unit> promise) {
   CHECK(snapshot_runner_config);
   CHECK(snapshot_runner_config->root_contract_config);
 
-  bool need_enable = is_disabled_until_version_ < snapshot_runner_config->root_contract_config->params_version();
+  bool need_enable = !is_disabled_until_version_ ||
+                     is_disabled_until_version_ < snapshot_runner_config->root_contract_config->params_version();
   if (need_enable) {
     is_disabled_until_version_ = 0;
     first_saved_state_seqno_ = last_saved_state_seqno_;
@@ -465,6 +466,12 @@ void ProxyRunner::custom_initialize(td::Promise<td::Unit> promise) {
     pending_blockchain_seqno_commits_[last_saved_state_seqno_] = session_unique_hash_;
     config_to_db(snapshot_runner_config);
     flush_db();
+  } else {
+    CHECK(!clients_.size());
+    CHECK(!workers_.size());
+    for (auto &model : models_) {
+      CHECK(!model.second.connections.size());
+    }
   }
 
   auto snap = kv_->snapshot();
@@ -1425,7 +1432,9 @@ std::string ProxyRunner::http_payout(std::string worker_sc_address) {
   if (worker.paying_now()) {
     return wrap_short_answer_to_http("request already running");
   }
-  all_to_db();
+  if (is_initialized()) {
+    all_to_db();
+  }
   if (!worker.tokens_ready_to_pay()) {
     return wrap_short_answer_to_http("nothing to pay");
   }
