@@ -8,6 +8,7 @@ struct ProxyStats {
   AmortCounterList requests_received;
   AmortCounterList requests_failed;
   AmortCounterList requests_success;
+  AmortCounterList requests_rejected;
   AmortCounterList total_requests_time;
   AmortCounterList request_bytes_received;
   AmortCounterList answer_bytes_sent;

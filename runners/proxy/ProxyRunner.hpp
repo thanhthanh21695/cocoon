@@ -207,6 +207,7 @@ class ProxyRunner : public BaseRunner {
   std::string http_payout(std::string worker_sc_address);
   std::string http_charge(std::string client_sc_address);
   std::string http_enable_disable(td::int64 disable_up_to_version);
+  std::string http_withdraw();
 
  private:
   block::StdAddress owner_address_;

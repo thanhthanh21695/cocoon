@@ -508,6 +508,12 @@ void ProxyRunner::custom_initialize(td::Promise<td::Unit> promise) {
           std::shared_ptr<ton::http::HttpPayload> payload,
           td::Promise<std::pair<std::unique_ptr<ton::http::HttpResponse>, std::shared_ptr<ton::http::HttpPayload>>>
               promise) { http_send_static_answer(http_payout(get_args["worker"]), std::move(promise)); });
+  register_custom_http_handler(
+      "/request/withdraw",
+      [&](std::string url, std::map<std::string, std::string> get_args, std::unique_ptr<ton::http::HttpRequest> request,
+          std::shared_ptr<ton::http::HttpPayload> payload,
+          td::Promise<std::pair<std::unique_ptr<ton::http::HttpResponse>, std::shared_ptr<ton::http::HttpPayload>>>
+              promise) { http_send_static_answer(http_withdraw(), std::move(promise)); });
 
   register_custom_http_handler(
       "/request/charge",
@@ -1286,6 +1292,7 @@ void ProxyRunner::forward_query(TcpClient::ConnectionId client_connection_id,
     auto res = cocoon::create_serialize_tl_object<cocoon_api::client_queryAnswerError>(
         S.code(), S.message().str(), client_request_id, ton::create_tl_object<cocoon_api::tokensUsed>(0, 0, 0, 0, 0));
     send_message_to_connection(client_connection_id, std::move(res));
+    stats_->requests_rejected++;
   };
 
   if (client->tokens_available() < req->max_tokens_) {
@@ -1422,6 +1429,22 @@ std::string ProxyRunner::http_enable_disable(td::int64 disable_up_to_version) {
   return wrap_short_answer_to_http("disabled");
 }
 
+std::string ProxyRunner::http_withdraw() {
+  if (!sc_) {
+    return wrap_short_answer_to_http("proxy is disabled");
+  }
+
+  if (!sc_->ready_for_withdraw()) {
+    return wrap_short_answer_to_http("nothing to withdraw");
+  }
+
+  auto msg = sc_->create_withdraw_message();
+
+  cocoon_wallet()->send_transaction(sc_->address(), to_nano(0.2), {}, std::move(msg), {});
+
+  return wrap_short_answer_to_http("request sent");
+}
+
 std::string ProxyRunner::http_generate_main() {
   td::StringBuilder sb;
   sb << "<!DOCTYPE html>\n";
@@ -1488,6 +1511,7 @@ std::string ProxyRunner::http_generate_main() {
     sb << "<tr><td>queries</td>" << stats_->requests_received.to_html_row() << "</tr>\n";
     sb << "<tr><td>success</td>" << stats_->requests_success.to_html_row() << "</tr>\n";
     sb << "<tr><td>failed</td>" << stats_->requests_failed.to_html_row() << "</tr>\n";
+    sb << "<tr><td>rejected</td>" << stats_->requests_rejected.to_html_row() << "</tr>\n";
     sb << "<tr><td>bytes received</td>" << stats_->request_bytes_received.to_html_row() << "</tr>\n";
     sb << "<tr><td>bytes sent</td>" << stats_->answer_bytes_sent.to_html_row() << "</tr>\n";
     sb << "<tr><td>time</td>" << stats_->total_requests_time.to_html_row() << "</tr>\n";
@@ -1598,6 +1622,7 @@ std::string ProxyRunner::http_generate_json_stats() {
   stats_->requests_received.to_jb(jb, "queries");
   stats_->requests_success.to_jb(jb, "success");
   stats_->requests_failed.to_jb(jb, "failed");
+  stats_->requests_rejected.to_jb(jb, "rejected");
   stats_->request_bytes_received.to_jb(jb, "bytes_received");
   stats_->answer_bytes_sent.to_jb(jb, "bytes_sent");
   stats_->total_requests_time.to_jb(jb, "time");

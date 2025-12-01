@@ -69,10 +69,10 @@ struct ProxyWorkerConnectionInfo : public std::enable_shared_from_this<ProxyWork
     auto v1 = total_queries_();
     auto v2 = total_queries_time_();
 
-    if (v2 <= 0.1) {
+    if (v1 <= 0.1) {
       return 0;
     } else {
-      return v1 / v2;
+      return v2 / v1;
     }
   }
 
