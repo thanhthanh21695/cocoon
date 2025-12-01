@@ -52,8 +52,17 @@ void ProxyRunningRequest::receive_answer(ton::tl_object_ptr<cocoon_api::proxy_qu
 
   tokens_used_ = std::move(ans->tokens_used_);
 
+  // Add proxy timing headers to the existing HTTP response using Unix timestamps
+  http_ans->headers_.push_back(cocoon::cocoon_api::make_object<cocoon_api::http_header>(
+      "X-Cocoon-Proxy-Start", PSTRING() << td::StringBuilder::FixedDouble(start_time_unix_, 6)));
+  http_ans->headers_.push_back(cocoon::cocoon_api::make_object<cocoon_api::http_header>(
+      "X-Cocoon-Proxy-End", PSTRING() << td::StringBuilder::FixedDouble(td::Clocks::system(), 6)));
+  
+  // Re-serialize the modified HTTP response
+  auto modified_answer = cocoon::serialize_tl_object(http_ans, true);
+  
   auto res = cocoon::create_serialize_tl_object<cocoon_api::client_queryAnswer>(
-      std::move(ans->answer_), ans->is_completed_, client_request_id_, tokens_used());
+      std::move(modified_answer), ans->is_completed_, client_request_id_, tokens_used());
 
   td::actor::send_closure(runner_, &ProxyRunner::send_message_to_connection, client_connection_id_, std::move(res));
 

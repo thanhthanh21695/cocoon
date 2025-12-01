@@ -62,6 +62,7 @@ class WorkerRunningRequest : public td::actor::Actor {
   td::int32 payload_parts_{0};
   td::int64 payload_bytes_{0};
   double started_at_ = td::Clocks::monotonic();
+  double started_at_unix_ = td::Clocks::system();
   bool completed_{false};
   bool sent_answer_{false};
 

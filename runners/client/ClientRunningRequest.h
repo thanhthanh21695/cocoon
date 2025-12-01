@@ -74,6 +74,7 @@ class ClientRunningRequest : public td::actor::Actor {
   td::actor::ActorId<ClientRunner> client_runner_;
   std::shared_ptr<ton::http::HttpPayload> out_payload_;
   double started_at_ = td::Clocks::monotonic();
+  double started_at_unix_ = td::Clocks::system();
   td::int64 payload_parts_{0};
   td::int64 payload_bytes_{0};
 };

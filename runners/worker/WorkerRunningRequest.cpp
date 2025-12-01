@@ -192,6 +192,12 @@ void WorkerRunningRequest::send_answer(std::unique_ptr<ton::http::HttpResponse> 
     }
     res->headers_.push_back(cocoon::cocoon_api::make_object<cocoon_api::http_header>(h->name_, h->value_));
   }
+  
+  // Add debug timing headers using Unix timestamps
+  res->headers_.push_back(cocoon::cocoon_api::make_object<cocoon_api::http_header>(
+      "X-Cocoon-Worker-Start", PSTRING() << td::StringBuilder::FixedDouble(started_at_unix_, 6)));
+  res->headers_.push_back(cocoon::cocoon_api::make_object<cocoon_api::http_header>(
+      "X-Cocoon-Worker-End", PSTRING() << td::StringBuilder::FixedDouble(td::Clocks::system(), 6)));
 
   if (payload_is_completed) {
     res->headers_.push_back(

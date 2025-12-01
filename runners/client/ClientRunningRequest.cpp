@@ -137,6 +137,13 @@ void ClientRunningRequest::process_answer(ton::tl_object_ptr<cocoon_api::client_
     ton::http::HttpHeader h{x->name_, x->value_};
     res->add_header(std::move(h));
   }
+  
+  // Add client timing headers using Unix timestamps
+  res->add_header(ton::http::HttpHeader{
+      "X-Cocoon-Client-Start", PSTRING() << td::StringBuilder::FixedDouble(started_at_unix_, 6)});
+  res->add_header(ton::http::HttpHeader{
+      "X-Cocoon-Client-End", PSTRING() << td::StringBuilder::FixedDouble(td::Clocks::system(), 6)});
+  
   res->complete_parse_header().ensure();
 
   out_payload_ = res->create_empty_payload().move_as_ok();

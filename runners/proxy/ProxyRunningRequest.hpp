@@ -78,6 +78,7 @@ struct ProxyRunningRequest : public td::actor::Actor {
   }
 
   double start_time_monotonic_ = td::Clocks::monotonic();
+  double start_time_unix_ = td::Clocks::system();
   td::int64 payload_parts_{0};
   td::int64 payload_bytes_{0};
 
