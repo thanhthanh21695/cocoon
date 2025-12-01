@@ -99,7 +99,6 @@ HUNYUAN_LANG_MAP = {
     "Vietnamese": "Vietnamese", "vi": "Vietnamese",
 }
 
-
 # Shared JSON schema for harmony functions
 HARMONY_SCHEMA = {
     "type": "object",
@@ -164,13 +163,13 @@ def fix_json_closing(json_str: str) -> str:
 
 
 def translate_with_roles(
-    text: Union[str, List[str]],
-    target_lang: str = "German (de)",
-    endpoint: str = "http://127.0.0.1:8000",
-    model: str = "openai/gpt-oss-20b",
-    temperature: float = 0,
-    timeout: int = 120,
-    verbose: bool = False
+        text: Union[str, List[str]],
+        target_lang: str = "German (de)",
+        endpoint: str = "http://127.0.0.1:8000",
+        model: str = "openai/gpt-oss-20b",
+        temperature: float = 0,
+        timeout: int = 120,
+        verbose: bool = False
 ) -> TranslationResult:
     is_single = isinstance(text, str)
     texts = [text] if is_single else text
@@ -187,7 +186,7 @@ def translate_with_roles(
     if verbose:
         print(f"\n[translate_with_roles] Translating {len(texts)} text(s) to {target_lang}")
         for i, t in enumerate(texts):
-            print(f"[translate_with_roles] Input {i+1}: {t}\n")
+            print(f"[translate_with_roles] Input {i + 1}: {t}\n")
 
     system_prompt = """# IDENTITY
 
@@ -236,7 +235,7 @@ You are a translator. You translate one or more texts into the target language s
         ],
         "temperature": temperature,
         "max_tokens": sum(len(t) for t in texts) * 4 + 1000,
-        "chat_template_kwargs": { "enable_thinking": False }
+        "chat_template_kwargs": {"enable_thinking": False}
     }
 
     if verbose:
@@ -285,7 +284,7 @@ You are a translator. You translate one or more texts into the target language s
             if verbose:
                 print(f"\n[translate_with_roles] Parsed {len(translated_texts)} translation(s)")
                 for i, txt in enumerate(translated_texts):
-                    print(f"[translate_with_roles] Translation {i+1}: {txt}\n")
+                    print(f"[translate_with_roles] Translation {i + 1}: {txt}\n")
 
             result = translated_texts[0] if is_single else translated_texts
             return TranslationResult.from_translation_and_headers(result, response.headers)
@@ -303,13 +302,13 @@ You are a translator. You translate one or more texts into the target language s
 
 
 def translate_harmony_manual(
-    text: Union[str, List[str]],
-    target_lang: str = "German (de)",
-    endpoint: str = "http://127.0.0.1:8000",
-    model: str = "openai/gpt-oss-20b",
-    temperature: float = 0,
-    timeout: int = 120,
-    verbose: bool = False
+        text: Union[str, List[str]],
+        target_lang: str = "German (de)",
+        endpoint: str = "http://127.0.0.1:8000",
+        model: str = "openai/gpt-oss-20b",
+        temperature: float = 0,
+        timeout: int = 120,
+        verbose: bool = False
 ) -> TranslationResult:
     is_single = isinstance(text, str)
     texts = [text] if is_single else text
@@ -326,7 +325,7 @@ def translate_harmony_manual(
     if verbose:
         print(f"\n[translate_harmony_manual] Translating {len(texts)} text(s) to {target_lang}")
         for i, t in enumerate(texts):
-            print(f"[translate_harmony_manual] Input {i+1}: {t}\n")
+            print(f"[translate_harmony_manual] Input {i + 1}: {t}\n")
 
     # Manually construct Harmony format prompt
     prompt = (
@@ -397,7 +396,7 @@ def translate_harmony_manual(
             if verbose:
                 print(f"\n[translate_harmony_manual] Parsed {len(translated_texts)} translation(s)")
                 for i, txt in enumerate(translated_texts):
-                    print(f"[translate_harmony_manual] Translation {i+1}: {txt}\n")
+                    print(f"[translate_harmony_manual] Translation {i + 1}: {txt}\n")
 
             result = translated_texts[0] if is_single else translated_texts
             return TranslationResult.from_translation_and_headers(result, response.headers)
@@ -414,13 +413,13 @@ def translate_harmony_manual(
 
 
 def translate_harmony_library(
-    text: Union[str, List[str]],
-    target_lang: str = "German (de)",
-    endpoint: str = "http://127.0.0.1:8000",
-    model: str = "openai/gpt-oss-20b",
-    temperature: float = 0,
-    timeout: int = 120,
-    verbose: bool = False
+        text: Union[str, List[str]],
+        target_lang: str = "German (de)",
+        endpoint: str = "http://127.0.0.1:8000",
+        model: str = "openai/gpt-oss-20b",
+        temperature: float = 0,
+        timeout: int = 120,
+        verbose: bool = False
 ) -> TranslationResult:
     is_single = isinstance(text, str)
     texts = [text] if is_single else text
@@ -437,7 +436,7 @@ def translate_harmony_library(
     if verbose:
         print(f"\n[translate_harmony_library] Translating {len(texts)} text(s) to {target_lang}")
         for i, t in enumerate(texts):
-            print(f"[translate_harmony_library] Input {i+1}: {t}\n")
+            print(f"[translate_harmony_library] Input {i + 1}: {t}\n")
 
     # Build conversation using openai-harmony
     system_msg = SystemContent.new().with_reasoning_effort(ReasoningEffort.LOW)
@@ -516,14 +515,16 @@ def translate_harmony_library(
                                     if "error" in t:
                                         error_type = t.get("error", "UNKNOWN_ERROR")
                                         if verbose:
-                                            print(f"\n[translate_harmony_library] Item {t.get('id')} returned error: {error_type}\n")
+                                            print(
+                                                f"\n[translate_harmony_library] Item {t.get('id')} returned error: {error_type}\n")
                                         raise ValueError(f"Translation error: {error_type}")
                                     translated_texts.append(t.get("translation", ""))
 
                                 if verbose:
-                                    print(f"\n[translate_harmony_library] Parsed {len(translated_texts)} translation(s)")
+                                    print(
+                                        f"\n[translate_harmony_library] Parsed {len(translated_texts)} translation(s)")
                                     for i, txt in enumerate(translated_texts):
-                                        print(f"[translate_harmony_library] Translation {i+1}: {txt}\n")
+                                        print(f"[translate_harmony_library] Translation {i + 1}: {txt}\n")
 
                                 result = translated_texts[0] if is_single else translated_texts
                                 return TranslationResult.from_translation_and_headers(result, response.headers)
@@ -542,14 +543,15 @@ def translate_harmony_library(
             print(f"\n[translate_harmony_library] Exception: {e}\n")
         raise
 
+
 def translate_hunyuan(
-    text: Union[str, List[str]],
-    target_lang: str = "German (de)",
-    endpoint: str = "http://127.0.0.1:8000",
-    model: str = "hunyuan",
-    temperature: float = 0.7,
-    timeout: int = 120,
-    verbose: bool = False
+        text: Union[str, List[str]],
+        target_lang: str = "German (de)",
+        endpoint: str = "http://127.0.0.1:8000",
+        model: str = "hunyuan",
+        temperature: float = 0.7,
+        timeout: int = 120,
+        verbose: bool = False
 ) -> TranslationResult:
     """
     Translate using Hunyuan-MT model format.
@@ -570,7 +572,7 @@ def translate_hunyuan(
     if verbose:
         print(f"\n[translate_hunyuan] Translating {len(texts)} text(s) to {hunyuan_target}")
         for i, t in enumerate(texts):
-            print(f"[translate_hunyuan] Input {i+1}: {t}\n")
+            print(f"[translate_hunyuan] Input {i + 1}: {t}\n")
 
     # Translate each text individually (Hunyuan-MT doesn't support batch in prompt)
     translations = []
@@ -600,7 +602,7 @@ def translate_hunyuan(
         }
 
         if verbose:
-            print(f"\n[translate_hunyuan] Request for text {idx+1}:")
+            print(f"\n[translate_hunyuan] Request for text {idx + 1}:")
             print(f"Prompt: {prompt[:200]}...")
             print(f"Payload: {json.dumps(payload, ensure_ascii=False, indent=2)}\n")
 
@@ -617,19 +619,19 @@ def translate_hunyuan(
             content = response_data["choices"][0]["message"]["content"].strip()
 
             if verbose:
-                print(f"\n[translate_hunyuan] Raw response for text {idx+1}: {content}\n")
+                print(f"\n[translate_hunyuan] Raw response for text {idx + 1}: {content}\n")
 
             if not content:
-                raise ValueError(f"Empty translation received for text {idx+1}")
+                raise ValueError(f"Empty translation received for text {idx + 1}")
 
             translations.append(content)
 
             if verbose:
-                print(f"[translate_hunyuan] Translation {idx+1}: {content}\n")
+                print(f"[translate_hunyuan] Translation {idx + 1}: {content}\n")
 
         except Exception as e:
             if verbose:
-                print(f"\n[translate_hunyuan] Exception for text {idx+1}: {e}\n")
+                print(f"\n[translate_hunyuan] Exception for text {idx + 1}: {e}\n")
             raise
 
     # Return result with headers from the last response

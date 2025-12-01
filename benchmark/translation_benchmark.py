@@ -176,37 +176,37 @@ def print_timing_breakdown(timing_stats: dict, prefix: str = ""):
     if worker_overheads:
         print(f"{prefix}  Worker duration:  avg: {statistics.mean(worker_overheads):.3f}s | "
               f"median: {statistics.median(worker_overheads):.3f}s | "
-              f"p90: {sorted(worker_overheads)[int(len(worker_overheads)*0.90)]:.3f}s")
+              f"p90: {sorted(worker_overheads)[int(len(worker_overheads) * 0.90)]:.3f}s")
     else:
         print(f"{prefix}  Worker duration:  N/A (no worker headers)")
 
     if proxy_overheads:
         print(f"{prefix}  Proxy overhead:   avg: {statistics.mean(proxy_overheads):.3f}s | "
               f"median: {statistics.median(proxy_overheads):.3f}s | "
-              f"p90: {sorted(proxy_overheads)[int(len(proxy_overheads)*0.90)]:.3f}s")
+              f"p90: {sorted(proxy_overheads)[int(len(proxy_overheads) * 0.90)]:.3f}s")
     else:
         print(f"{prefix}  Proxy overhead:   N/A (no proxy headers)")
 
     if client_overheads:
         print(f"{prefix}  Client overhead:  avg: {statistics.mean(client_overheads):.3f}s | "
               f"median: {statistics.median(client_overheads):.3f}s | "
-              f"p90: {sorted(client_overheads)[int(len(client_overheads)*0.90)]:.3f}s")
+              f"p90: {sorted(client_overheads)[int(len(client_overheads) * 0.90)]:.3f}s")
     else:
         print(f"{prefix}  Client overhead:  N/A (no client headers)")
 
 
 def translate_chunk(
-    chunk_id: int,
-    chunk: str,
-    translate_func,
-    target_lang: str,
-    endpoint: str,
-    model: str,
-    timeout: int,
-    start_time: float,
-    debug: bool = False,
-    active_counter = None,
-    submit_time: float = 0.0
+        chunk_id: int,
+        chunk: str,
+        translate_func,
+        target_lang: str,
+        endpoint: str,
+        model: str,
+        timeout: int,
+        start_time: float,
+        debug: bool = False,
+        active_counter=None,
+        submit_time: float = 0.0
 ) -> BenchmarkResult:
     # Calculate pending time (from submit to now)
     pending_time = time.time() - submit_time if submit_time > 0 else 0.0
@@ -300,19 +300,19 @@ def translate_chunk(
 
 
 def run_benchmark(
-    chunks: List[str],
-    endpoint: str,
-    model: str,
-    concurrency: int,
-    target_lang: str,
-    prompt_format: str,
-    timeout: int,
-    max_chunks: Optional[int] = None,
-    stats_interval: int = 10,
-    debug: bool = False,
-    target_langs: Optional[List[str]] = None,
-    load_mode: str = "burst",
-    qps: Optional[float] = None
+        chunks: List[str],
+        endpoint: str,
+        model: str,
+        concurrency: int,
+        target_lang: str,
+        prompt_format: str,
+        timeout: int,
+        max_chunks: Optional[int] = None,
+        stats_interval: int = 10,
+        debug: bool = False,
+        target_langs: Optional[List[str]] = None,
+        load_mode: str = "burst",
+        qps: Optional[float] = None
 ) -> List[BenchmarkResult]:
     """Run the benchmark with specified concurrency using threads
     
@@ -369,7 +369,8 @@ def run_benchmark(
     if len(unique_langs) == 1:
         print(f"  Target language: {target_lang}")
     else:
-        print(f"  Target languages: {len(unique_langs)} different ({', '.join(list(unique_langs)[:5])}{'...' if len(unique_langs) > 5 else ''})")
+        print(
+            f"  Target languages: {len(unique_langs)} different ({', '.join(list(unique_langs)[:5])}{'...' if len(unique_langs) > 5 else ''})")
 
     print(f"  Prompt format: {prompt_format}")
     print(f"  Timeout: {timeout}s")
@@ -438,7 +439,8 @@ def run_benchmark(
 
         print(f"[{chunk_id + 1}/{len(chunks)}] Processing chunk (length: {chunk_len}, target: {chunk_target_lang})...")
         result = translate_chunk(
-            chunk_id, chunk, translate_func, chunk_target_lang, endpoint, model, timeout, start_time, debug, active_counter, submit_time
+            chunk_id, chunk, translate_func, chunk_target_lang, endpoint, model, timeout, start_time, debug,
+            active_counter, submit_time
         )
 
         speed = chunk_len / result.duration if result.duration > 0 else 0
@@ -465,15 +467,18 @@ def run_benchmark(
 
         if result.success:
             if chunk_id < 3 or (chunk_id + 1) % 20 == 0:
-                print(f"[{chunk_id + 1}/{len(chunks)}] ✓ {result.duration:.2f}s{pending_str}{timing_str} | {chunk_len} chars | {speed:.0f} chars/s | active: {active} | queue: {queue_size}")
+                print(
+                    f"[{chunk_id + 1}/{len(chunks)}] ✓ {result.duration:.2f}s{pending_str}{timing_str} | {chunk_len} chars | {speed:.0f} chars/s | active: {active} | queue: {queue_size}")
                 print(f"  Original: {chunk[:100]}...")
                 print(f"  Translation: {result.translation}")
                 print()
             else:
-                print(f"[{chunk_id + 1}/{len(chunks)}] ✓ {result.duration:.2f}s{pending_str}{timing_str} | {chunk_len} chars | {speed:.0f} chars/s | active: {active} | queue: {queue_size}")
+                print(
+                    f"[{chunk_id + 1}/{len(chunks)}] ✓ {result.duration:.2f}s{pending_str}{timing_str} | {chunk_len} chars | {speed:.0f} chars/s | active: {active} | queue: {queue_size}")
         else:
             timeout_marker = " [TIMEOUT]" if result.timed_out else ""
-            print(f"[{chunk_id + 1}/{len(chunks)}] ✗{timeout_marker} {result.duration:.2f}s{pending_str}{timing_str} | {chunk_len} chars | {speed:.0f} chars/s | active: {active} | queue: {queue_size} | {result.error}")
+            print(
+                f"[{chunk_id + 1}/{len(chunks)}] ✗{timeout_marker} {result.duration:.2f}s{pending_str}{timing_str} | {chunk_len} chars | {speed:.0f} chars/s | active: {active} | queue: {queue_size} | {result.error}")
             if debug:
                 print(f"  Chunk preview: {chunk[:200]}...")
 
@@ -610,7 +615,8 @@ def print_stats(results: List[BenchmarkResult], elapsed_time: float, total_chunk
 
         print(f"\n  Latency:")
         print(f"    Min: {min(durations):.2f}s | Avg: {statistics.mean(durations):.2f}s | Max: {max(durations):.2f}s")
-        print(f"    P50: {sorted_durations[p50_idx]:.2f}s | P90: {sorted_durations[p90_idx]:.2f}s | P99: {sorted_durations[p99_idx]:.2f}s")
+        print(
+            f"    P50: {sorted_durations[p50_idx]:.2f}s | P90: {sorted_durations[p90_idx]:.2f}s | P99: {sorted_durations[p99_idx]:.2f}s")
         if is_final and len(durations) > 1:
             print(f"    Std Dev: {statistics.stdev(durations):.2f}s")
 
@@ -648,7 +654,8 @@ def print_stats(results: List[BenchmarkResult], elapsed_time: float, total_chunk
 
         print(f"\n  Last 30s Performance:")
         print(f"    Requests completed: {len(recent_successful)}")
-        print(f"    Avg latency: {statistics.mean(recent_durations):.2f}s | P50: {p50_recent:.2f}s | P90: {p90_recent:.2f}s | P99: {p99_recent:.2f}s")
+        print(
+            f"    Avg latency: {statistics.mean(recent_durations):.2f}s | P50: {p50_recent:.2f}s | P90: {p90_recent:.2f}s | P99: {p99_recent:.2f}s")
         if recent_pending_times:
             print(f"    Avg pending: {statistics.mean(recent_pending_times):.2f}s")
         print(f"    Throughput: {len(recent_successful) / recent_window:.2f} req/s")
@@ -683,8 +690,6 @@ def print_stats(results: List[BenchmarkResult], elapsed_time: float, total_chunk
             print(f"    {count}x: {error}")
 
     print(f"{separator * 70}\n")
-
-
 
 
 def main():

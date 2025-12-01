@@ -216,16 +216,13 @@ def load_config_from_file(cli_args) -> Config:
     def getint(key, default):
         val = get(key)
         return int(val) if val is not None else default
-    
+
     def getbool(key, default=False):
         """Get boolean from config or CLI args"""
-        print(f"get {key}")
         cli_val = getattr(cli_args, key, None)
         if cli_val is not None:
-            print(f"has {cli_val} in cli")
             return cli_val
         val = ini.get('node', key, fallback=None)
-        print(f"has {val} in config")
         if val is None:
             return default
         # Handle various boolean representations
@@ -261,7 +258,7 @@ def load_config_from_file(cli_args) -> Config:
         external_worker_port=getint('external_worker_port', 11001) if fake_ton else None,
         external_client_port=getint('external_client_port', 11002) if fake_ton else None,
         node_wallet_key=get('node_wallet_key',
-                               'gaEatwGNgLGOeFI/TRGfPdJG/K4G8picYHQkDHpLQ9w=' if fake_ton else None),
+                            'gaEatwGNgLGOeFI/TRGfPdJG/K4G8picYHQkDHpLQ9w=' if fake_ton else None),
         # Runtime control
         test=test,
         fake_ton=fake_ton,
@@ -271,9 +268,9 @@ def load_config_from_file(cli_args) -> Config:
         hf_token=get('hf_token') or os.environ.get('HF_TOKEN'),
         # TON configs
         ton_config_base=get('ton_config_base',
-                          str(script_dir / 'spec/mainnet-base-ton-config.json')) if not fake_ton else None,
+                            str(script_dir / 'spec/mainnet-base-ton-config.json')) if not fake_ton else None,
         ton_config=get('ton_config',
-                                  str(script_dir / 'spec/mainnet-full-ton-config.json')) if not fake_ton else None,
+                       str(script_dir / 'spec/mainnet-full-ton-config.json')) if not fake_ton else None,
         # Paths
         image_dir=get('image-dir', str(script_dir / 'images' / ('test' if test else 'prod'))),
         build_dir=get('build_dir', build_dir),
@@ -716,15 +713,15 @@ def run_local_all(cfg):
     run(['rm', '-rf', '/tmp/proxy-db/'], check=False)
 
     import threading
-    
+
     def stream_output(proc, prefix, color_code):
         """Read process output line by line and prefix each line"""
         for line in proc.stdout:
             print(f"\033[{color_code}m[{prefix}]\033[0m {line}", end='', flush=True)
-    
+
     procs = []
     threads = []
-    
+
     # Proxy (blue)
     proxy_proc = popen(
         [f'{cfg.build_dir}/proxy-runner', '--config', '/tmp/run/proxy-config.json', '-v3', '--disable-ton',
@@ -734,7 +731,7 @@ def run_local_all(cfg):
     t = threading.Thread(target=stream_output, args=(proxy_proc, 'PROXY ', '34'), daemon=True)
     t.start()
     threads.append(t)
-    
+
     # Worker (green)
     worker_proc = popen(
         [f'{cfg.build_dir}/worker-runner', '--config', '/tmp/run/worker-config.json', '-v3', '--disable-ton',
@@ -744,7 +741,7 @@ def run_local_all(cfg):
     t = threading.Thread(target=stream_output, args=(worker_proc, 'WORKER', '32'), daemon=True)
     t.start()
     threads.append(t)
-    
+
     # Client (yellow)
     client_proc = popen(
         [f'{cfg.build_dir}/client-runner', '--config', '/tmp/run/client-config.json', '-v3', '--disable-ton',
@@ -754,13 +751,13 @@ def run_local_all(cfg):
     t = threading.Thread(target=stream_output, args=(client_proc, 'CLIENT', '33'), daemon=True)
     t.start()
     threads.append(t)
-    
+
     # Proxy-cli (cyan)
     proxycli_proc = popen([f'{cfg.build_dir}/tee/router', '-S', '8116@any',
-                        '-R', '11001:127.0.0.1:11101@any',
-                        '-R', '11002:127.0.0.1:11102@any',
-                        '--serialize-info'],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+                           '-R', '11001:127.0.0.1:11101@any',
+                           '-R', '11002:127.0.0.1:11102@any',
+                           '--serialize-info'],
+                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
     procs.append(proxycli_proc)
     t = threading.Thread(target=stream_output, args=(proxycli_proc, 'ROUTER', '36'), daemon=True)
     t.start()
@@ -800,7 +797,8 @@ def parse_args():
     parser.add_argument('--node-wallet_key', dest='node_wallet_key', help='NODE_WALLET_KEY')
 
     # TON configs
-    parser.add_argument('--ton-config-base', dest='ton_config_base', help='Immutable TON config base (blockchain constants)')
+    parser.add_argument('--ton-config-base', dest='ton_config_base',
+                        help='Immutable TON config base (blockchain constants)')
     parser.add_argument('--ton-config', dest='ton_config', help='User-provided TON config (liteservers)')
 
     # Modes
