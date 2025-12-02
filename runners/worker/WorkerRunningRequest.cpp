@@ -71,10 +71,12 @@ void WorkerRunningRequest::start_request() {
 
     TRY_RESULT_ASSIGN(request, ton::http::HttpRequest::create(req->method_, req->url_, req->http_version_));
     for (auto &x : req->headers_) {
-      ton::http::HttpHeader h{x->name_, x->value_};
-      if (x->name_ == "Content-Length" || x->name_ == "Transfer-Encoding" || x->name_ == "Connection") {
+      auto name = x->name_;
+      std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return std::tolower(c); });
+      if (name == "content-length" || x->name_ == "transfer-encoding" || x->name_ == "connection") {
         continue;
       }
+      ton::http::HttpHeader h{x->name_, x->value_};
       TRY_STATUS(h.basic_check());
       request->add_header(std::move(h));
     }
@@ -192,7 +194,9 @@ void WorkerRunningRequest::send_answer(std::unique_ptr<ton::http::HttpResponse> 
       td::BufferSlice(payload_to_send));
 
   for (auto &h : r->headers_) {
-    if (h->name_ == "Content-Length" || h->name_ == "Transfer-Encoding" || h->name_ == "Connection") {
+    auto name = h->name_;
+    std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return std::tolower(c); });
+    if (h->name_ == "content-length" || h->name_ == "transfer-encoding" || h->name_ == "connection") {
       continue;
     }
     res->headers_.push_back(cocoon::cocoon_api::make_object<cocoon_api::http_header>(h->name_, h->value_));
@@ -204,13 +208,12 @@ void WorkerRunningRequest::send_answer(std::unique_ptr<ton::http::HttpResponse> 
   res->headers_.push_back(cocoon::cocoon_api::make_object<cocoon_api::http_header>(
       "X-Cocoon-Worker-End", PSTRING() << td::StringBuilder::FixedDouble(td::Clocks::system(), 6)));
 
-  /*if (payload_is_completed) {
+  if (payload_is_completed) {
     res->headers_.push_back(
         cocoon::cocoon_api::make_object<cocoon_api::http_header>("Content-Length", PSTRING() << res->payload_.size()));
   } else {
     res->headers_.push_back(cocoon::cocoon_api::make_object<cocoon_api::http_header>("Transfer-Encoding", "chunked"));
-  }*/
-  res->headers_.push_back(cocoon::cocoon_api::make_object<cocoon_api::http_header>("Transfer-Encoding", "chunked"));
+  }
 
   auto serialized_res = cocoon::serialize_tl_object(res, true);
   auto ans = cocoon::cocoon_api::make_object<cocoon_api::proxy_queryAnswer>(
