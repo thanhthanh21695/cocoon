@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
+import pandas as pd
 
 # Quality metrics
 try:
@@ -75,7 +76,163 @@ except ImportError:
     print("Please install datasets: pip install datasets")
     sys.exit(1)
 
-from translate import translate, TranslateConfig, add_translate_args, config_from_args
+from translate import translate, TranslateConfig, load_config_from_file
+
+# Translation cache using DuckDB
+try:
+    import duckdb
+    DUCKDB_AVAILABLE = True
+except ImportError:
+    DUCKDB_AVAILABLE = False
+    print("Note: duckdb not available. Install for translation caching: pip install duckdb")
+
+
+def _stable_hash(s: str) -> str:
+    """Deterministic hash (first 16 bytes of sha256)."""
+    import hashlib
+    return hashlib.sha256(s.encode('utf-8')).hexdigest()[:32]
+
+
+class TranslationCache:
+    """Cache for translation results using DuckDB.
+    
+    Uses thread-local connections for thread safety.
+    """
+    
+    def __init__(self, cache_path: Optional[str] = "translation_cache.duckdb"):
+        self.cache_path = cache_path
+        self.enabled = cache_path is not None and DUCKDB_AVAILABLE
+        self._local = threading.local()
+        self._lock = threading.Lock()
+        if self.enabled:
+            self._init_db()
+    
+    def _get_conn(self):
+        """Get thread-local connection."""
+        if not hasattr(self._local, 'conn') or self._local.conn is None:
+            self._local.conn = duckdb.connect(self.cache_path)
+        return self._local.conn
+    
+    def _init_db(self):
+        """Initialize DuckDB table."""
+        try:
+            conn = self._get_conn()
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS translations (
+                    source_hash VARCHAR,
+                    target_lang VARCHAR,
+                    config_key VARCHAR,
+                    prompt_format VARCHAR,
+                    hypothesis VARCHAR,
+                    duration DOUBLE,
+                    timestamp DOUBLE,
+                    PRIMARY KEY (source_hash, target_lang, config_key, prompt_format)
+                )
+            """)
+            count = conn.execute("SELECT COUNT(*) FROM translations").fetchone()[0]
+            if count > 0:
+                configs = conn.execute("SELECT DISTINCT config_key FROM translations LIMIT 5").fetchall()
+                configs_str = ', '.join(c[0] for c in configs)
+                print(f"Loaded {count} cached translations from {self.cache_path}")
+                print(f"  Configs in cache: {configs_str}")
+        except Exception as e:
+            print(f"Warning: Could not initialize cache: {e}")
+            self.enabled = False
+    
+    def get(self, source: str, target_lang: str, config: TranslateConfig, debug: bool = False) -> Optional[Tuple[str, float]]:
+        """Get cached translation. Returns (hypothesis, duration) or None."""
+        if not self.enabled:
+            return None
+        
+        source_hash = _stable_hash(source)
+        config_key = config.cache_key()
+        
+        if debug:
+            print(f"  [cache] lookup: hash={source_hash[:16]}..., lang={target_lang}, key={config_key}, fmt={config.prompt_format}")
+        
+        try:
+            conn = self._get_conn()
+            result = conn.execute("""
+                SELECT hypothesis, duration FROM translations 
+                WHERE source_hash = ? AND target_lang = ? AND config_key = ? AND prompt_format = ?
+            """, [source_hash, target_lang, config_key, config.prompt_format]).fetchone()
+            
+            if debug:
+                count = conn.execute("SELECT COUNT(*) FROM translations").fetchone()[0]
+                print(f"  [cache] {'HIT' if result else 'MISS'}, total entries: {count}")
+            
+            if result:
+                return (result[0], result[1])
+        except Exception as e:
+            if debug:
+                print(f"  [cache] error: {e}")
+        return None
+    
+    def put(self, source: str, target_lang: str, config: TranslateConfig, hypothesis: str, duration: float):
+        """Store translation in cache."""
+        if not self.enabled:
+            return
+        
+        source_hash = _stable_hash(source)
+        config_key = config.cache_key()
+        
+        try:
+            with self._lock:
+                conn = self._get_conn()
+                # INSERT OR REPLACE
+                conn.execute("""
+                    INSERT OR REPLACE INTO translations 
+                    (source_hash, target_lang, config_key, prompt_format, hypothesis, duration, timestamp)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, [source_hash, target_lang, config_key, config.prompt_format, hypothesis, duration, time.time()])
+        except Exception as e:
+            print(f"Warning: Could not cache translation: {e}")
+    
+    def save(self):
+        """Explicitly save cache."""
+        try:
+            conn = self._get_conn()
+            conn.execute("CHECKPOINT")
+        except:
+            pass
+    
+    def stats(self) -> str:
+        """Return cache statistics."""
+        if not self.enabled:
+            return "disabled"
+        try:
+            conn = self._get_conn()
+            count = conn.execute("SELECT COUNT(*) FROM translations").fetchone()[0]
+            if count == 0:
+                return "empty"
+            configs = conn.execute("SELECT DISTINCT config_key FROM translations LIMIT 3").fetchall()
+            configs_str = ', '.join(c[0] for c in configs)
+            return f"{count} entries, configs: {configs_str}"
+        except:
+            return "error"
+
+
+# Global cache instance
+_TRANSLATION_CACHE: Optional[TranslationCache] = None
+
+def get_translation_cache(cache_path: str = "translation_cache.parquet", enabled: bool = True) -> TranslationCache:
+    """Get or create global translation cache."""
+    global _TRANSLATION_CACHE
+    if _TRANSLATION_CACHE is None:
+        if enabled:
+            _TRANSLATION_CACHE = TranslationCache(cache_path)
+        else:
+            _TRANSLATION_CACHE = TranslationCache(None)  # Disabled cache
+    return _TRANSLATION_CACHE
+
+
+def init_cache(cache_path: str, enabled: bool = True):
+    """Initialize the global cache with specific settings."""
+    global _TRANSLATION_CACHE
+    if enabled and cache_path:
+        _TRANSLATION_CACHE = TranslationCache(cache_path)
+    else:
+        _TRANSLATION_CACHE = TranslationCache(None)
 
 
 # WMT24++ language code mapping
@@ -172,6 +329,7 @@ class TranslationSample:
 
 # Dataset cache (must be after TranslationSample is defined)
 _DATASET_CACHE: Dict[str, List[TranslationSample]] = {}
+_DATASET_CACHE_LOCK = threading.Lock()
 
 
 @dataclass
@@ -190,7 +348,7 @@ class EvalResult:
 
 def load_test_data(src_lang: str, tgt_lang: str, num_samples: int = 100) -> List[TranslationSample]:
     """
-    Load test data for any language pair (with caching).
+    Load test data for any language pair (with thread-safe caching).
     
     - Uses WMT24++ for en->xx pairs (better quality references)
     - Uses FLORES-200 for xx->en and xx->yy pairs
@@ -205,21 +363,23 @@ def load_test_data(src_lang: str, tgt_lang: str, num_samples: int = 100) -> List
     """
     cache_key = f"{src_lang}-{tgt_lang}:{num_samples}"
     
-    # Check cache first
-    if cache_key in _DATASET_CACHE:
-        samples = _DATASET_CACHE[cache_key]
-        print(f"Loading data: {src_lang}->{tgt_lang} (cached, {len(samples)} samples)")
-        return [TranslationSample(source=s.source, reference=s.reference) for s in samples]
+    # Check cache first (with lock for thread safety)
+    with _DATASET_CACHE_LOCK:
+        if cache_key in _DATASET_CACHE:
+            samples = _DATASET_CACHE[cache_key]
+            print(f"Loading data: {src_lang}->{tgt_lang} (cached, {len(samples)} samples)")
+            return [TranslationSample(source=s.source, reference=s.reference) for s in samples]
     
-    # Use WMT24++ for en->xx (better quality post-edited references)
+    # Load outside lock (slow operation)
     if src_lang == "en" and tgt_lang in WMT_LANG_MAP:
         samples = _load_wmt_data(src_lang, tgt_lang, num_samples)
     else:
-        # Use FLORES for xx->en and xx->yy
         samples = _load_flores_data(src_lang, tgt_lang, num_samples)
     
-    # Cache for reuse
-    _DATASET_CACHE[cache_key] = samples
+    # Cache for reuse (with lock)
+    with _DATASET_CACHE_LOCK:
+        _DATASET_CACHE[cache_key] = samples
+    
     return [TranslationSample(source=s.source, reference=s.reference) for s in samples]
 
 
@@ -293,188 +453,6 @@ def _load_flores_data(src_lang: str, tgt_lang: str, num_samples: int) -> List[Tr
     return samples
 
 
-def translate_sample(
-    sample: TranslationSample,
-    tgt_lang: str,
-    config: TranslateConfig,
-    idx: int,
-    total: int
-) -> TranslationSample:
-    """Translate a single sample."""
-    target_lang_name = LANG_NAMES.get(tgt_lang, f"{tgt_lang}")
-    
-    start_time = time.time()
-    try:
-        result = translate(sample.source, target_lang=target_lang_name, config=config)
-        sample.hypothesis = result.translation
-        sample.duration = time.time() - start_time
-        print(f"[{idx+1}/{total}] ✓ {sample.duration:.2f}s | {len(sample.source)} chars")
-    except Exception as e:
-        sample.error = str(e)
-        sample.duration = time.time() - start_time
-        print(f"[{idx+1}/{total}] ✗ {sample.duration:.2f}s | Error: {e}")
-    
-    return sample
-
-
-def evaluate_pair(
-    src_lang: str,
-    tgt_lang: str,
-    config: TranslateConfig,
-    num_samples: int = 100,
-    concurrency: int = 1,
-    verbose: bool = False
-) -> EvalResult:
-    """
-    Evaluate translation quality for a language pair.
-    
-    Args:
-        src_lang: Source language code
-        tgt_lang: Target language code
-        config: TranslateConfig for translation (includes prompt_format)
-        num_samples: Number of samples to evaluate
-        concurrency: Number of concurrent requests
-        verbose: Print sample details
-    
-    Returns:
-        EvalResult with metrics
-    """
-    print(f"\n{'='*70}")
-    print(f"Evaluating: {src_lang} -> {tgt_lang}")
-    print(f"{'='*70}")
-    
-    # Load data
-    samples = load_test_data(src_lang, tgt_lang, num_samples)
-    
-    if not samples:
-        print(f"No samples loaded for {src_lang} -> {tgt_lang}")
-        return EvalResult(
-            src_lang=src_lang,
-            tgt_lang=tgt_lang,
-            bleu=0.0,
-            chrf=0.0,
-            comet=None,
-            num_samples=0,
-            num_errors=0,
-            avg_duration=0.0
-        )
-    
-    # Translate samples
-    print(f"\nTranslating {len(samples)} samples...")
-    start_time = time.time()
-    
-    if concurrency > 1:
-        # Parallel translation
-        with ThreadPoolExecutor(max_workers=concurrency) as executor:
-            futures = {
-                executor.submit(
-                    translate_sample, sample, tgt_lang, config, i, len(samples)
-                ): i for i, sample in enumerate(samples)
-            }
-            for future in as_completed(futures):
-                future.result()  # Raises exception if translation failed
-    else:
-        # Sequential translation
-        for i, sample in enumerate(samples):
-            translate_sample(sample, tgt_lang, config, i, len(samples))
-    
-    total_time = time.time() - start_time
-    
-    # Filter successful translations
-    successful = [s for s in samples if s.hypothesis is not None]
-    errors = [s for s in samples if s.error is not None]
-    
-    print(f"\nTranslation complete: {len(successful)} successful, {len(errors)} errors")
-    print(f"Total time: {total_time:.2f}s ({total_time/len(samples):.2f}s per sample)")
-    
-    if not successful:
-        return EvalResult(
-            src_lang=src_lang,
-            tgt_lang=tgt_lang,
-            bleu=0.0,
-            chrf=0.0,
-            comet=None,
-            num_samples=len(samples),
-            num_errors=len(errors),
-            avg_duration=total_time / len(successful) if successful else 0,
-            samples=samples
-        )
-    
-    # Calculate metrics
-    hypotheses = [s.hypothesis for s in successful]
-    references = [[s.reference] for s in successful]  # BLEU expects list of lists
-    sources = [s.source for s in successful]
-    
-    # BLEU score
-    bleu = BLEU()
-    bleu_score = bleu.corpus_score(hypotheses, references)
-    
-    # chrF score
-    chrf = CHRF()
-    chrf_score = chrf.corpus_score(hypotheses, references)
-    
-    # COMET score (neural metric - much better for semantic evaluation)
-    comet_score = None
-    comet_scores_per_sample = None
-    comet_model = get_comet_model()
-    if comet_model is not None:
-        print("\nCalculating COMET scores...")
-        try:
-            comet_data = [
-                {"src": src, "mt": hyp, "ref": ref}
-                for src, hyp, ref in zip(sources, hypotheses, [r[0] for r in references])
-            ]
-            comet_output = comet_model.predict(comet_data, batch_size=8, gpus=0)
-            comet_score = comet_output.system_score
-            comet_scores_per_sample = comet_output.scores
-            print(f"COMET score: {comet_score:.4f}")
-        except Exception as e:
-            print(f"COMET calculation failed: {e}")
-    
-    avg_duration = sum(s.duration for s in successful) / len(successful) if successful else 0
-    
-    print(f"\n{'─'*70}")
-    print(f"Results for {src_lang} -> {tgt_lang}:")
-    print(f"  BLEU:  {bleu_score.score:.2f}")
-    print(f"  chrF:  {chrf_score.score:.2f}")
-    if comet_score is not None:
-        print(f"  COMET: {comet_score:.4f}")
-    print(f"  Samples: {len(successful)}/{len(samples)} successful")
-    print(f"  Avg duration: {avg_duration:.2f}s (successful only)")
-    print(f"{'─'*70}")
-    
-    # Always show some example translations with sentence-level scores
-    print("\nExample translations:")
-    num_examples = 5 if verbose else 3
-    sent_bleu_metric = BLEU(effective_order=True)  # Better for short sentences
-    for i, s in enumerate(successful[:num_examples]):
-        # Calculate sentence-level scores
-        sent_bleu = sent_bleu_metric.sentence_score(s.hypothesis, [s.reference])
-        sent_chrf = chrf.sentence_score(s.hypothesis, [s.reference])
-        
-        # Include COMET if available
-        if comet_scores_per_sample:
-            comet_sent = comet_scores_per_sample[i]
-            print(f"\n  [{i+1}] BLEU: {sent_bleu.score:.1f} | chrF: {sent_chrf.score:.1f} | COMET: {comet_sent:.3f}")
-        else:
-            print(f"\n  [{i+1}] BLEU: {sent_bleu.score:.1f} | chrF: {sent_chrf.score:.1f}")
-        print(f"      Source:     {s.source[:200]}{'...' if len(s.source) > 200 else ''}")
-        print(f"      Reference:  {s.reference[:200]}{'...' if len(s.reference) > 200 else ''}")
-        print(f"      Hypothesis: {s.hypothesis[:200]}{'...' if len(s.hypothesis) > 200 else ''}")
-    
-    return EvalResult(
-        src_lang=src_lang,
-        tgt_lang=tgt_lang,
-        bleu=bleu_score.score,
-        chrf=chrf_score.score,
-        comet=comet_score,
-        num_samples=len(samples),
-        num_errors=len(errors),
-        avg_duration=avg_duration,
-        samples=samples
-    )
-
-
 @dataclass
 class PairData:
     """Data for a single language pair evaluation."""
@@ -494,18 +472,24 @@ def evaluate_batch(
     Batch evaluation: load all data, translate all, evaluate all.
     Much faster for COMET (single batch instead of per-pair).
     """
-    # Phase 1: Load all data
+    # Phase 1: Load all data (parallel)
     print(f"\n{'='*70}")
     print("PHASE 1: Loading all test data")
     print(f"{'='*70}")
     
-    all_pair_data: List[PairData] = []
-    for src, tgt in pairs:
+    def load_pair(pair):
+        src, tgt = pair
         try:
             samples = load_test_data(src, tgt, num_samples)
-            all_pair_data.append(PairData(src_lang=src, tgt_lang=tgt, samples=samples))
+            return PairData(src_lang=src, tgt_lang=tgt, samples=samples)
         except Exception as e:
             print(f"  Error loading {src}->{tgt}: {e}")
+            return None
+    
+    all_pair_data: List[PairData] = []
+    with ThreadPoolExecutor(max_workers=min(8, len(pairs))) as executor:
+        results = list(executor.map(load_pair, pairs))
+        all_pair_data = [r for r in results if r is not None]
     
     total_samples = sum(len(pd.samples) for pd in all_pair_data)
     print(f"\nTotal: {total_samples} samples across {len(all_pair_data)} language pairs")
@@ -526,44 +510,57 @@ def evaluate_batch(
     
     start_time = time.time()
     
-    def translate_task(task_idx, task):
+    def translate_task(task_idx, task, cache: TranslationCache):
         pair_idx, sample_idx, sample, tgt_lang = task
         pd = all_pair_data[pair_idx]
         pair_label = f"{pd.src_lang}->{pd.tgt_lang}"
         
         target_lang_name = LANG_NAMES.get(tgt_lang, f"{tgt_lang}")
+        
+        # Check cache first (debug for first 3 lookups)
+        debug_cache = (task_idx < 3)
+        cached = cache.get(sample.source, target_lang_name, config, debug=debug_cache)
+        if cached:
+            sample.hypothesis, sample.duration = cached
+            print(f"[{task_idx+1}/{total_samples}] {pair_label} ⚡ CACHED ({sample.duration:.2f}s) | {len(sample.source)} chars")
+            return
+        
         t0 = time.time()
         try:
             result = translate(sample.source, target_lang=target_lang_name, config=config)
             sample.hypothesis = result.translation
             sample.duration = time.time() - t0
             print(f"[{task_idx+1}/{total_samples}] {pair_label} ✓ {sample.duration:.2f}s | {len(sample.source)} chars")
+            # Store in cache
+            cache.put(sample.source, target_lang_name, config, sample.hypothesis, sample.duration)
         except Exception as e:
             sample.error = str(e)
             sample.duration = time.time() - t0
             error_msg = str(e)
             print(f"[{task_idx+1}/{total_samples}] {pair_label} ✗ {sample.duration:.2f}s | Error: {error_msg}")
-            # Print more details for JSON errors
             if "Expecting value" in error_msg or "JSONDecode" in error_msg:
                 print(f"      Source text: {sample.source[:100]}...")
-                # Try to get response details from exception context
-                if hasattr(e, '__context__') and e.__context__:
-                    print(f"      Context: {str(e.__context__)[:200]}")
+    
+    cache = get_translation_cache()
     
     if concurrency > 1:
         with ThreadPoolExecutor(max_workers=concurrency) as executor:
             futures = {
-                executor.submit(translate_task, i, task): i 
+                executor.submit(translate_task, i, task, cache): i 
                 for i, task in enumerate(tasks)
             }
             for future in as_completed(futures):
                 future.result()
     else:
         for i, task in enumerate(tasks):
-            translate_task(i, task)
+            translate_task(i, task, cache)
+    
+    # Save cache after translations
+    cache.save()
     
     translation_time = time.time() - start_time
     print(f"\nTranslation complete: {translation_time:.1f}s total ({translation_time/total_samples:.2f}s per sample)")
+    print(f"Cache: {cache.stats()}")
     
     # Phase 3: Evaluate all (COMET in single batch!)
     print(f"\n{'='*70}")
@@ -681,13 +678,17 @@ def parse_lang_pairs(pairs_str: str) -> List[Tuple[str, str]]:
     return pairs
 
 
-def get_top_pairs_from_csv(csv_path: str, top_n: int = 20) -> List[Tuple[str, str]]:
+def get_top_pairs_from_csv(csv_path: str, top_n: int = 20) -> Tuple[List[Tuple[str, str]], Dict[str, float]]:
     """
-    Get top language pairs from lang.csv file.
+    Get top language pairs from lang.csv file with cumulative percentages.
     Excludes same-language pairs (en-en, ru-ru, etc.)
     Supports any direction (en->xx, xx->en, xx->yy).
+    
+    Returns:
+        Tuple of (pairs list, cumulative percentage dict keyed by "src->tgt")
     """
     import csv
+    import re
     
     # Languages supported by FLORES-200 (haoranxu/FLORES-200)
     FLORES_LANGS = {"en", "ru", "zh", "es", "tr", "pt", "ko", "id", "ar", "fr", 
@@ -696,11 +697,18 @@ def get_top_pairs_from_csv(csv_path: str, top_n: int = 20) -> List[Tuple[str, st
                     "bg", "da", "fi", "no", "sv", "et", "lt", "lv", "sl", "hr"}
     
     pairs = []
+    cumulative_pct = {}
+    total_pct = 0.0
+    
     with open(csv_path, 'r') as f:
         reader = csv.DictReader(f)
         for row in reader:
             to_lang = row['to_lang']
             from_lang = row['from_lang']
+            
+            # Parse percentage from num_pct column like "11317957 (7.11%)"
+            pct_match = re.search(r'\(([\d.]+)%\)', row.get('num_pct', ''))
+            pct = float(pct_match.group(1)) if pct_match else 0.0
             
             # Skip same-language pairs
             if to_lang == from_lang:
@@ -715,13 +723,20 @@ def get_top_pairs_from_csv(csv_path: str, top_n: int = 20) -> List[Tuple[str, st
             # Skip pairs not in FLORES
             if from_lang not in FLORES_LANGS or to_lang not in FLORES_LANGS:
                 continue
-                
+            
+            total_pct += pct
+            pair_key = f"{from_lang}->{to_lang}"
             pairs.append((from_lang, to_lang))
+            cumulative_pct[pair_key] = total_pct
             
             if len(pairs) >= top_n:
                 break
     
-    return pairs
+    return pairs, cumulative_pct
+
+
+# Global to store cumulative percentages for display
+_PAIR_CUMULATIVE_PCT: Dict[str, float] = {}
 
 
 def save_results(results: List[EvalResult], output_path: str):
@@ -788,78 +803,141 @@ def print_summary(results: List[EvalResult], title: str = "SUMMARY"):
     print(f"{'='*85}\n")
 
 
-def print_comparison(results_local: List[EvalResult], results_azure: List[EvalResult]):
-    """Print side-by-side comparison of local vs Azure results."""
-    has_comet = any(r.comet is not None for r in results_local + results_azure)
+def _format_with_diff(val: float, vals: list, higher_is_better: bool, fmt: str = ".4f") -> str:
+    """Format value with diff from best, colored green if best, red if worst."""
+    best = max(vals) if higher_is_better else min(vals)
+    worst = min(vals) if higher_is_better else max(vals)
+    diff = val - best if higher_is_better else best - val  # Always show as negative diff from best
     
-    print(f"\n{'='*110}")
-    print("COMPARISON: Local vs Azure")
-    print(f"{'='*110}")
-    
-    if has_comet:
-        print(f"{'Pair':<10} {'LOCAL COMET':>11} {'AZURE COMET':>11} {'Δ COMET':>9} │ {'LOCAL chrF':>10} {'AZURE chrF':>10} │ {'LOCAL t':>8} {'AZURE t':>8} {'Δ t':>8}")
+    if val == best:
+        formatted = f"{val:{fmt}}"
+        return f"\033[92m{formatted}\033[0m"  # Green, no diff needed
     else:
-        print(f"{'Pair':<10} {'LOCAL chrF':>10} {'AZURE chrF':>10} {'Δ chrF':>9} │ {'LOCAL t':>8} {'AZURE t':>8} {'Δ t':>8}")
-    print(f"{'-'*110}")
+        formatted = f"{val:{fmt}} ({diff:+.2f})"
+        if val == worst:
+            return f"\033[91m{formatted}\033[0m"  # Red
+        return formatted
+
+
+def print_comparison(all_results: Dict[str, List[EvalResult]]):
+    """Print comparison table for multiple models using pandas."""
+    if len(all_results) < 2:
+        return
     
-    # Build lookup by pair
-    local_by_pair = {(r.src_lang, r.tgt_lang): r for r in results_local}
-    azure_by_pair = {(r.src_lang, r.tgt_lang): r for r in results_azure}
+    names = list(all_results.keys())
+    has_comet = any(r.comet is not None for results in all_results.values() for r in results)
+    metric = "COMET" if has_comet else "chrF"
     
-    all_pairs = set(local_by_pair.keys()) | set(azure_by_pair.keys())
+    # Preserve original pair order from first model's results
+    first_results = list(all_results.values())[0]
+    pair_order = [f"{r.src_lang}->{r.tgt_lang}" for r in first_results]
     
-    for pair in sorted(all_pairs):
-        local = local_by_pair.get(pair)
-        azure = azure_by_pair.get(pair)
-        pair_str = f"{pair[0]}->{pair[1]}"
+    # Build dataframe
+    rows = []
+    for name, results in all_results.items():
+        for r in results:
+            rows.append({
+                'pair': f"{r.src_lang}->{r.tgt_lang}",
+                'model': name,
+                'score': r.comet if has_comet and r.comet else r.chrf,
+                'time': r.avg_duration,
+                'errors': r.num_errors
+            })
+    
+    df = pd.DataFrame(rows)
+    
+    # Check for duplicates
+    duplicates = df.groupby(['pair', 'model']).size()
+    duplicates = duplicates[duplicates > 1]
+    if len(duplicates) > 0:
+        print("\nWarning: Duplicate entries found (will be aggregated):")
+        for (pair, model), count in duplicates.items():
+            print(f"  {pair} / {model}: {count} entries")
+    
+    # Use pivot_table to handle potential duplicates (aggregates with mean)
+    score_table = df.pivot_table(index='pair', columns='model', values='score', aggfunc='mean')[names]
+    time_table = df.pivot_table(index='pair', columns='model', values='time', aggfunc='mean')[names]
+    error_table = df.pivot_table(index='pair', columns='model', values='errors', aggfunc='sum')[names]
+    
+    # Column width - needs space for diff like "0.8955 (-0.01)"
+    col_w = max(18, max(len(n) for n in names) + 2)
+    err_w = max(8, max(len(n) for n in names) + 2)  # Same width for consistency
+    
+    print(f"\n{'='*140}")
+    print(f"COMPARISON: {' vs '.join(names)}")
+    print(f"{'='*140}")
+    
+    # Column width for pair (includes cumulative %)
+    pair_w = 18
+    
+    # Header with model names - score, time, errors columns
+    header = f"{'Pair':<{pair_w}}"
+    for name in names:
+        header += f" {name:>{col_w}}"
+    for name in names:
+        header += f" {name+' t':>{col_w}}"
+    for name in names:
+        header += f" {name+' err':>{err_w}}"
+    print(header)
+    
+    # Subheader with metric labels
+    subheader = f"{'':<{pair_w}}"
+    for _ in names:
+        subheader += f" {metric:>{col_w}}"
+    for _ in names:
+        subheader += f" {'(sec)':>{col_w}}"
+    for _ in names:
+        subheader += f" {'':>{err_w}}"
+    print(subheader)
+    print("-" * len(header))
+    
+    # Data rows (in original order)
+    for pair in pair_order:
+        if pair not in score_table.index:
+            continue
+        scores = list(score_table.loc[pair])
+        times = list(time_table.loc[pair])
+        errors = list(error_table.loc[pair].astype(int))
         
-        local_time = local.avg_duration if local else 0
-        azure_time = azure.avg_duration if azure else 0
-        delta_time = local_time - azure_time
-        delta_time_str = f"{delta_time:+.2f}s"
-        
-        if has_comet:
-            local_comet = local.comet if local and local.comet else 0
-            azure_comet = azure.comet if azure and azure.comet else 0
-            delta_comet = local_comet - azure_comet
-            delta_comet_str = f"{delta_comet:+.4f}"
-            local_chrf = local.chrf if local else 0
-            azure_chrf = azure.chrf if azure else 0
-            print(f"{pair_str:<10} {local_comet:>11.4f} {azure_comet:>11.4f} {delta_comet_str:>9} │ {local_chrf:>10.2f} {azure_chrf:>10.2f} │ {local_time:>7.2f}s {azure_time:>7.2f}s {delta_time_str:>8}")
+        # Show cumulative percentage if available
+        cum_pct = _PAIR_CUMULATIVE_PCT.get(pair)
+        if cum_pct is not None:
+            pair_display = f"{pair} ({cum_pct:.0f}%)"
         else:
-            local_chrf = local.chrf if local else 0
-            azure_chrf = azure.chrf if azure else 0
-            delta_chrf = local_chrf - azure_chrf
-            delta_chrf_str = f"{delta_chrf:+.2f}"
-            print(f"{pair_str:<10} {local_chrf:>10.2f} {azure_chrf:>10.2f} {delta_chrf_str:>9} │ {local_time:>7.2f}s {azure_time:>7.2f}s {delta_time_str:>8}")
+            pair_display = pair
+        row = f"{pair_display:<18}"
+        for s in scores:
+            row += f" {_format_with_diff(s, scores, True):>{col_w + 9}}"  # +9 for ANSI
+        for t in times:
+            row += f" {_format_with_diff(t, times, False, '.2f'):>{col_w + 9}}"
+        for e in errors:
+            # Red if errors, no color if 0
+            if e > 0:
+                row += f" \033[91m{e:>{err_w}}\033[0m"
+            else:
+                row += f" {e:>{err_w}}"
+        print(row)
     
-    print(f"{'-'*110}")
+    # Totals
+    print("-" * len(header))
+    avg_scores = list(score_table.mean())
+    avg_times = list(time_table.mean())
+    total_errors = list(error_table.sum().astype(int))
     
-    # Averages
-    if results_local and results_azure:
-        avg_local_time = sum(r.avg_duration for r in results_local) / len(results_local)
-        avg_azure_time = sum(r.avg_duration for r in results_azure) / len(results_azure)
-        delta_avg_time = avg_local_time - avg_azure_time
-        delta_avg_time_str = f"{delta_avg_time:+.2f}s"
-        
-        if has_comet:
-            local_comets = [r.comet for r in results_local if r.comet]
-            azure_comets = [r.comet for r in results_azure if r.comet]
-            avg_local_comet = sum(local_comets) / len(local_comets) if local_comets else 0
-            avg_azure_comet = sum(azure_comets) / len(azure_comets) if azure_comets else 0
-            delta_avg_comet = avg_local_comet - avg_azure_comet
-            avg_local_chrf = sum(r.chrf for r in results_local) / len(results_local)
-            avg_azure_chrf = sum(r.chrf for r in results_azure) / len(results_azure)
-            print(f"{'AVERAGE':<10} {avg_local_comet:>11.4f} {avg_azure_comet:>11.4f} {delta_avg_comet:>+9.4f} │ {avg_local_chrf:>10.2f} {avg_azure_chrf:>10.2f} │ {avg_local_time:>7.2f}s {avg_azure_time:>7.2f}s {delta_avg_time_str:>8}")
+    row = f"{'AVERAGE':<{pair_w}}"
+    for s in avg_scores:
+        row += f" {_format_with_diff(s, avg_scores, True):>{col_w + 9}}"
+    for t in avg_times:
+        row += f" {_format_with_diff(t, avg_times, False, '.2f'):>{col_w + 9}}"
+    for e in total_errors:
+        if e > 0:
+            row += f" \033[91m{e:>{err_w}}\033[0m"
         else:
-            avg_local_chrf = sum(r.chrf for r in results_local) / len(results_local)
-            avg_azure_chrf = sum(r.chrf for r in results_azure) / len(results_azure)
-            delta_avg_chrf = avg_local_chrf - avg_azure_chrf
-            print(f"{'AVERAGE':<10} {avg_local_chrf:>10.2f} {avg_azure_chrf:>10.2f} {delta_avg_chrf:>+9.2f} │ {avg_local_time:>7.2f}s {avg_azure_time:>7.2f}s {delta_avg_time_str:>8}")
+            row += f" {e:>{err_w}}"
+    print(row)
     
-    print(f"{'='*110}")
-    print("Note: Positive Δ means LOCAL is better (higher COMET/chrF, lower time is shown as negative Δ t)")
-    print()
+    print(f"{'='*140}")
+    print("\033[92mGreen\033[0m = Best, \033[91mRed\033[0m = Worst/Errors, (diff from best)")
 
 
 def run_evaluation(
@@ -879,6 +957,7 @@ def run_evaluation(
     print(f"\nConfiguration:")
     print(f"  Endpoint: {config.endpoint}" + (" (Azure)" if config.use_azure else ""))
     print(f"  Model: {config.model}")
+    print(f"  Cache key: {config.cache_key()}")
     print(f"  Samples per pair: {num_samples}")
     print(f"  Concurrency: {concurrency}")
     print(f"  GPU available: {has_gpu()}")
@@ -899,21 +978,31 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Evaluate specific language pairs
-  python quality_eval.py --pairs en-ru,en-zh --num-samples 50
+  # Evaluate single model
+  python quality_eval.py azure.conf --pairs en-ru
 
-  # Compare local endpoint vs Azure
-  python quality_eval.py --pairs en-ru --compare --num-samples 50
+  # Compare two models
+  python quality_eval.py tencent-local.conf azure.conf --pairs en-ru
 
-  # Evaluate with Azure endpoint only
-  python quality_eval.py --pairs en-ru --azure --num-samples 20
+  # Compare multiple models
+  python quality_eval.py vllm.conf sglang.conf azure.conf --num-samples 50
+
+Config file format (INI):
+  [model]
+  endpoint = http://127.0.0.1:10000
+  model = Qwen/Qwen3-8B
+  prompt_format = roles
+  description = vllm-qwen3-8b
+  timeout = 40
+  azure = false
         """
     )
     
-    # Common translation arguments
-    add_translate_args(parser, include_concurrency=True)
+    # Config files (positional, one or more)
+    parser.add_argument('configs', nargs='+', metavar='CONFIG',
+                        help='Config file(s) to evaluate (INI format)')
     
-    # Quality eval specific arguments
+    # Evaluation options
     parser.add_argument('--pairs', type=str,
                         help='Language pairs to evaluate, comma-separated (e.g., en-ru,en-zh)')
     parser.add_argument('--from-csv', type=str,
@@ -922,27 +1011,38 @@ Examples:
                         help='Number of top pairs to evaluate from CSV')
     parser.add_argument('--num-samples', type=int, default=100,
                         help='Number of samples per language pair')
-    parser.add_argument('--compare', action='store_true',
-                        help='Compare local endpoint vs Azure (runs both)')
+    parser.add_argument('--concurrency', type=int, default=1,
+                        help='Number of concurrent translation requests')
+    parser.add_argument('--verbose', '-v', action='store_true',
+                        help='Verbose output')
     parser.add_argument('--output', type=str, default='quality_results.json',
                         help='Output file for results')
+    parser.add_argument('--cache', type=str, default='translation_cache.duckdb',
+                        help='Translation cache file (duckdb format)')
+    parser.add_argument('--no-cache', action='store_true',
+                        help='Disable translation caching')
     
     args = parser.parse_args()
     
+    # Initialize cache
+    init_cache(args.cache, enabled=not args.no_cache)
+    
     # Determine language pairs
+    global _PAIR_CUMULATIVE_PCT
+    _PAIR_CUMULATIVE_PCT = {}
+    
     if args.pairs:
         pairs = parse_lang_pairs(args.pairs)
     elif args.from_csv:
-        pairs = get_top_pairs_from_csv(args.from_csv, args.top_pairs)
+        pairs, _PAIR_CUMULATIVE_PCT = get_top_pairs_from_csv(args.from_csv, args.top_pairs)
         print(f"Loaded {len(pairs)} pairs from {args.from_csv}")
     else:
         # Default: load top pairs from lang.csv in script directory
-        import os
         script_dir = os.path.dirname(os.path.abspath(__file__))
         default_csv = os.path.join(script_dir, "lang.csv")
         
         if os.path.exists(default_csv):
-            pairs = get_top_pairs_from_csv(default_csv, args.top_pairs)
+            pairs, _PAIR_CUMULATIVE_PCT = get_top_pairs_from_csv(default_csv, args.top_pairs)
             print(f"Loaded top {len(pairs)} pairs from lang.csv")
         else:
             # Fallback if lang.csv not found
@@ -958,70 +1058,52 @@ Examples:
     
     print(f"\nLanguage pairs to evaluate ({len(pairs)}):")
     for src, tgt in pairs:
-        print(f"  {src} -> {tgt}")
+        pair_key = f"{src}->{tgt}"
+        cum_pct = _PAIR_CUMULATIVE_PCT.get(pair_key)
+        if cum_pct is not None:
+            print(f"  {src} -> {tgt} (cumul: {cum_pct:.1f}%)")
+        else:
+            print(f"  {src} -> {tgt}")
     
-    if args.compare:
-        # Compare mode: run both local and Azure
-        print("\n" + "="*85)
-        print("COMPARISON MODE: Running evaluation on both Local and Azure endpoints")
-        print("="*85)
-        
-        # Local endpoint
-        config_local = config_from_args(args)
-        config_local.use_azure = False
-        results_local = run_evaluation(
-            pairs, config_local,
-            args.num_samples, args.concurrency, args.verbose,
-            label=f"LOCAL ENDPOINT: {args.endpoint}"
-        )
-        
-        # Azure endpoint (always use roles format)
-        config_azure = config_from_args(args)
-        config_azure.use_azure = True
-        config_azure.prompt_format = "roles"
-        results_azure = run_evaluation(
-            pairs, config_azure,
-            args.num_samples, args.concurrency, args.verbose,
-            label="AZURE ENDPOINT"
-        )
-        
-        # Print individual summaries
-        if results_local:
-            print_summary(results_local, title="SUMMARY: LOCAL")
-        if results_azure:
-            print_summary(results_azure, title="SUMMARY: AZURE")
-        
-        # Print comparison
-        if results_local and results_azure:
-            print_comparison(results_local, results_azure)
-        
-        # Save combined results
-        if results_local or results_azure:
-            combined = {
-                "local": [{"src_lang": r.src_lang, "tgt_lang": r.tgt_lang, "bleu": r.bleu, "chrf": r.chrf, "comet": r.comet} for r in results_local],
-                "azure": [{"src_lang": r.src_lang, "tgt_lang": r.tgt_lang, "bleu": r.bleu, "chrf": r.chrf, "comet": r.comet} for r in results_azure],
-            }
-            with open(args.output, 'w') as f:
-                json.dump(combined, f, indent=2)
-            print(f"\nResults saved to {args.output}")
+    # Load all configs
+    configs = []
+    for config_path in args.configs:
+        config = load_config_from_file(config_path)
+        config.verbose = args.verbose
+        configs.append(config)
     
-    else:
-        # Single endpoint mode
-        config = config_from_args(args)
-        
-        # Azure always uses roles format
-        if config.use_azure:
-            config.prompt_format = "roles"
-        
+    print(f"\nModels to evaluate ({len(configs)}):")
+    for config in configs:
+        print(f"  {config.cache_key()}")
+    
+    # Run evaluation for each config
+    all_results = {}
+    for config in configs:
+        name = config.cache_key()
         results = run_evaluation(
             pairs, config,
-            args.num_samples, args.concurrency, args.verbose
+            args.num_samples, args.concurrency, args.verbose,
+            label=name
         )
-        
-        # Print summary and save
+        all_results[name] = results
         if results:
-            print_summary(results)
-            save_results(results, args.output)
+            print_summary(results, title=f"SUMMARY: {name}")
+    
+    # Print comparison if multiple configs
+    if len(configs) >= 2:
+        valid_results = {k: v for k, v in all_results.items() if v}
+        if len(valid_results) >= 2:
+            print_comparison(valid_results)
+    
+    # Save results
+    if any(all_results.values()):
+        combined = {
+            name: [{"src_lang": r.src_lang, "tgt_lang": r.tgt_lang, "bleu": r.bleu, "chrf": r.chrf, "comet": r.comet} for r in results]
+            for name, results in all_results.items() if results
+        }
+        with open(args.output, 'w') as f:
+            json.dump(combined, f, indent=2)
+        print(f"\nResults saved to {args.output}")
 
 
 if __name__ == "__main__":

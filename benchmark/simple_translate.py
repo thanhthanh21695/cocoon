@@ -10,7 +10,7 @@ Usage:
 
 import sys
 import argparse
-from translate import translate, add_translate_args, config_from_args
+from translate import translate, add_translate_args, config_from_args, load_config_from_file
 
 
 def main():
@@ -21,6 +21,8 @@ def main():
                         help='Text to translate (alternative to stdin)')
     parser.add_argument('--query-file', type=str,
                         help='Read text from file (alternative to stdin)')
+    parser.add_argument('--config', type=str,
+                        help='Load model config from INI file')
     add_translate_args(parser)
     
     args = parser.parse_args()
@@ -43,7 +45,8 @@ def main():
         if not text:
             sys.exit("No text provided.")
 
-        config = config_from_args(args)
+        # Load config from file or args
+        config = load_config_from_file(args.config) if args.config else config_from_args(args)
 
         print(f"Translating to {args.target_lang}...", file=sys.stderr)
         print(f"  Endpoint: {config.endpoint}" + (" (Azure)" if config.use_azure else ""), file=sys.stderr)

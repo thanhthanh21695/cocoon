@@ -1,3 +1,4 @@
+import configparser
 import json
 import os
 import threading
@@ -153,8 +154,20 @@ class TranslateConfig:
     timeout: int = 40
     verbose: bool = False
     use_azure: bool = False
-    keep_alive: bool = False
+    keep_alive: bool = True  # Default: reuse HTTP connections
+    description: str = ""  # Description for cache key (e.g., "vllm-qwen3-8b", "sglang-local")
+    azure_model: str = "gpt-4.1-mini"  # Azure model name for cache key
     _thread_local: threading.local = field(default_factory=threading.local, repr=False)
+    
+    def cache_key(self) -> str:
+        """Return a unique key for caching based on config."""
+        # Azure uses azure:{azure_model}
+        if self.use_azure:
+            return f"azure:{self.azure_model}"
+        # Local: use description if provided, else endpoint:model
+        if self.description:
+            return self.description
+        return f"{self.endpoint}:{self.model}"
     
     def chat_url(self) -> str:
         """Get the URL for chat completions endpoint."""
@@ -233,6 +246,12 @@ def extract_debug_data(response_data: dict, content: str = None) -> Optional[dic
     return None
 
 
+def _log(config, tag: str, msg: str):
+    """Simple verbose logging helper."""
+    if config.verbose:
+        print(f"[{tag}] {msg}")
+
+
 def print_curl(url: str, headers: dict, payload: dict):
     """Print a curl command that can be copy-pasted into terminal."""
     import shlex
@@ -250,22 +269,31 @@ def print_curl(url: str, headers: dict, payload: dict):
 
 
 # Language name mapping for Hunyuan-MT
-HUNYUAN_LANG_MAP = {
-    "Chinese": "中文", "zh": "中文",
-    "English": "English", "en": "English",
-    "French": "French", "fr": "French",
-    "Portuguese": "Portuguese", "pt": "Portuguese",
-    "Spanish": "Spanish", "es": "Spanish",
-    "Japanese": "Japanese", "ja": "Japanese",
-    "Turkish": "Turkish", "tr": "Turkish",
-    "Russian": "Russian", "ru": "Russian",
-    "Arabic": "Arabic", "ar": "Arabic",
-    "Korean": "Korean", "ko": "Korean",
-    "Thai": "Thai", "th": "Thai",
-    "Italian": "Italian", "it": "Italian",
-    "German": "German", "de": "German",
-    "Vietnamese": "Vietnamese", "vi": "Vietnamese",
-}
+# Hunyuan-MT supported languages (38 total): (code, English name, Chinese name)
+_HUNYUAN_LANG_DATA = [
+    ("zh", "Chinese", "中文"), ("en", "English", "英语"), ("fr", "French", "法语"),
+    ("pt", "Portuguese", "葡萄牙语"), ("es", "Spanish", "西班牙语"), ("ja", "Japanese", "日语"),
+    ("tr", "Turkish", "土耳其语"), ("ru", "Russian", "俄语"), ("ar", "Arabic", "阿拉伯语"),
+    ("ko", "Korean", "韩语"), ("th", "Thai", "泰语"), ("it", "Italian", "意大利语"),
+    ("de", "German", "德语"), ("vi", "Vietnamese", "越南语"), ("ms", "Malay", "马来语"),
+    ("id", "Indonesian", "印尼语"), ("tl", "Filipino", "菲律宾语"), ("hi", "Hindi", "印地语"),
+    ("zh-Hant", "Traditional Chinese", "繁体中文"), ("pl", "Polish", "波兰语"),
+    ("cs", "Czech", "捷克语"), ("nl", "Dutch", "荷兰语"), ("km", "Khmer", "高棉语"),
+    ("my", "Burmese", "缅甸语"), ("fa", "Persian", "波斯语"), ("gu", "Gujarati", "古吉拉特语"),
+    ("ur", "Urdu", "乌尔都语"), ("te", "Telugu", "泰卢固语"), ("mr", "Marathi", "马拉地语"),
+    ("he", "Hebrew", "希伯来语"), ("bn", "Bengali", "孟加拉语"), ("ta", "Tamil", "泰米尔语"),
+    ("uk", "Ukrainian", "乌克兰语"), ("bo", "Tibetan", "藏语"), ("kk", "Kazakh", "哈萨克语"),
+    ("mn", "Mongolian", "蒙古语"), ("ug", "Uyghur", "维吾尔语"), ("yue", "Cantonese", "粤语"),
+]
+# Build lookup: code/name -> (English, Chinese)
+HUNYUAN_LANGS = {k: (en, zh) for code, en, zh in _HUNYUAN_LANG_DATA for k in (code, en)}
+
+def get_hunyuan_lang(target_lang: str, use_chinese: bool) -> str:
+    """Get language name for Hunyuan prompt (English or Chinese version)."""
+    name = target_lang.split("(")[0].strip()
+    if name in HUNYUAN_LANGS:
+        return HUNYUAN_LANGS[name][1 if use_chinese else 0]
+    return name
 
 # Shared JSON schema for harmony functions
 HARMONY_SCHEMA = {
@@ -347,10 +375,7 @@ def translate_with_roles(
         "texts": [{"id": i + 1, "text": t} for i, t in enumerate(texts)]
     }
 
-    if config.verbose:
-        print(f"\n[translate_with_roles] Translating {len(texts)} text(s) to {target_lang}")
-        for i, t in enumerate(texts):
-            print(f"[translate_with_roles] Input {i + 1}: {t}\n")
+    _log(config, "roles", f"Translating {len(texts)} text(s) to {target_lang}")
 
     system_prompt = """# IDENTITY
 
@@ -420,21 +445,13 @@ You are a translator. You translate one or more texts into the target language s
         # Extract debug data from response if present
         debug_data = extract_debug_data(response_data, content)
 
-        if config.verbose:
-            print(response.json())
-            print(f"\n[translate_with_roles] Raw response: {content}\n")
-            if debug_data:
-                print(f"\n[translate_with_roles] Debug data: {json.dumps(debug_data, indent=2)}\n")
+        _log(config, "roles", f"Response: {content[:200]}...")
 
         # Extract JSON from response
         json_start = content.find("{")
         json_end = content.rfind("}") + 1
         if json_start >= 0 and json_end > json_start:
             json_str = content[json_start:json_end]
-
-            if config.verbose:
-                print(f"\n[translate_with_roles] Extracted JSON:\n{json_str}\n")
-
             try:
                 result = json.loads(json_str)
             except json.JSONDecodeError as e:
@@ -449,29 +466,17 @@ You are a translator. You translate one or more texts into the target language s
             translated_texts = []
             for t in translations:
                 if "error" in t:
-                    error_type = t.get("error", "UNKNOWN_ERROR")
-                    if config.verbose:
-                        print(f"\n[translate_with_roles] Item {t.get('id')} returned error: {error_type}\n")
-                    raise ValueError(f"Translation error: {error_type}")
+                    raise ValueError(f"Translation error: {t.get('error', 'UNKNOWN_ERROR')}")
                 translated_texts.append(t.get("translation", ""))
 
-            if config.verbose:
-                print(f"\n[translate_with_roles] Parsed {len(translated_texts)} translation(s)")
-                for i, txt in enumerate(translated_texts):
-                    print(f"[translate_with_roles] Translation {i + 1}: {txt}\n")
-
+            _log(config, "roles", f"Got {len(translated_texts)} translation(s)")
             result = translated_texts[0] if is_single else translated_texts
             return TranslationResult.from_translation_and_headers(result, response.headers, debug_data)
 
-        error_msg = f"Could not parse translation from response. Content: {content[:300]}"
-        if config.verbose:
-            print(f"\n[translate_with_roles] ERROR: {error_msg}\n")
-        raise ValueError(error_msg)
+        raise ValueError(f"Could not parse translation. Content: {content[:300]}")
 
     except Exception as e:
-        if config.verbose:
-            print(f"\n[translate_with_roles] Exception: {e}\n")
-            print(f"\n[translate_with_roles] Error: {e}\n")
+        _log(config, "roles", f"Error: {e}")
         raise
 
 
@@ -492,10 +497,7 @@ def translate_harmony_manual(
         "texts": [{"id": i + 1, "text": t} for i, t in enumerate(texts)]
     }
 
-    if config.verbose:
-        print(f"\n[translate_harmony_manual] Translating {len(texts)} text(s) to {target_lang}")
-        for i, t in enumerate(texts):
-            print(f"[translate_harmony_manual] Input {i + 1}: {t}\n")
+    _log(config, "harmony", f"Translating {len(texts)} text(s) to {target_lang}")
 
     # Manually construct Harmony format prompt
     prompt = (
@@ -532,10 +534,7 @@ def translate_harmony_manual(
         # Extract debug data from response if present
         debug_data = extract_debug_data(response_data, content)
 
-        if config.verbose:
-            print(f"\n[translate_harmony_manual] Raw response: {content}\n")
-            if debug_data:
-                print(f"\n[translate_harmony_manual] Debug data: {json.dumps(debug_data, indent=2)}\n")
+        _log(config, "harmony", f"Response: {content[:200]}...")
 
         # If model added reasoning and final channel marker, extract content after it
         marker = "<|channel|>final<|message|>"
@@ -550,9 +549,6 @@ def translate_harmony_manual(
         # Fix incomplete JSON closing
         json_str = fix_json_closing(json_str)
 
-        if config.verbose:
-            print(f"\n[translate_harmony_manual] Final JSON:\n{json_str}\n")
-
         try:
             result = json.loads(json_str)
         except json.JSONDecodeError as e:
@@ -565,28 +561,17 @@ def translate_harmony_manual(
             translated_texts = []
             for t in translations:
                 if "error" in t:
-                    error_type = t.get("error", "UNKNOWN_ERROR")
-                    if config.verbose:
-                        print(f"\n[translate_harmony_manual] Item {t.get('id')} returned error: {error_type}\n")
-                    raise ValueError(f"Translation error: {error_type}")
+                    raise ValueError(f"Translation error: {t.get('error', 'UNKNOWN_ERROR')}")
                 translated_texts.append(t.get("translation", ""))
 
-            if config.verbose:
-                print(f"\n[translate_harmony_manual] Parsed {len(translated_texts)} translation(s)")
-                for i, txt in enumerate(translated_texts):
-                    print(f"[translate_harmony_manual] Translation {i + 1}: {txt}\n")
-
+            _log(config, "harmony", f"Got {len(translated_texts)} translation(s)")
             result = translated_texts[0] if is_single else translated_texts
             return TranslationResult.from_translation_and_headers(result, response.headers, debug_data)
 
-        error_msg = f"Could not parse translation from response. JSON: {json_str[:300]}"
-        if config.verbose:
-            print(f"\n[translate_harmony_manual] ERROR: {error_msg}\n")
-        raise ValueError(error_msg)
+        raise ValueError(f"Could not parse translation. JSON: {json_str[:300]}")
 
     except Exception as e:
-        if config.verbose:
-            print(f"\n[translate_harmony_manual] Exception: {e}\n")
+        _log(config, "harmony", f"Error: {e}")
         raise
 
 
@@ -607,10 +592,7 @@ def translate_harmony_library(
         "texts": [{"id": i + 1, "text": t} for i, t in enumerate(texts)]
     }
 
-    if config.verbose:
-        print(f"\n[translate_harmony_library] Translating {len(texts)} text(s) to {target_lang}")
-        for i, t in enumerate(texts):
-            print(f"[translate_harmony_library] Input {i + 1}: {t}\n")
+    _log(config, "harmony-lib", f"Translating {len(texts)} text(s) to {target_lang}")
 
     # Build conversation using openai-harmony
     system_msg = SystemContent.new().with_reasoning_effort(ReasoningEffort.LOW)
@@ -656,18 +638,12 @@ def translate_harmony_library(
         # Extract debug data from response if present
         debug_data = extract_debug_data(response_data, content)
 
-        if config.verbose:
-            print(f"\n[translate_harmony_library] Raw response: {content}\n")
-            if debug_data:
-                print(f"\n[translate_harmony_library] Debug data: {json.dumps(debug_data, indent=2)}\n")
+        _log(config, "harmony-lib", f"Response: {content[:200]}...")
 
         # Parse with harmony library
         full_content = "<|start|>assistant<|channel|>final<|message|>" + content
         tokens = HARMONY_ENC.encode(full_content, allowed_special="all")
         parsed_messages = HARMONY_ENC.parse_messages_from_completion_tokens(tokens, role=Role.ASSISTANT)
-
-        if config.verbose:
-            print(f"\n[translate_harmony_library] Parsed {len(parsed_messages)} message(s)\n")
 
         # Iterate in reverse to get the last (final) valid translation
         for msg in reversed(parsed_messages):
@@ -679,9 +655,6 @@ def translate_harmony_library(
                         # Fix incomplete JSON closing
                         json_text = fix_json_closing(json_text)
 
-                        if config.verbose:
-                            print(f"\n[translate_harmony_library] Final JSON to parse:\n{json_text}\n")
-
                         try:
                             result = json.loads(json_text)
                             if "translations" in result:
@@ -691,34 +664,19 @@ def translate_harmony_library(
                                 translated_texts = []
                                 for t in translations:
                                     if "error" in t:
-                                        error_type = t.get("error", "UNKNOWN_ERROR")
-                                        if config.verbose:
-                                            print(
-                                                f"\n[translate_harmony_library] Item {t.get('id')} returned error: {error_type}\n")
-                                        raise ValueError(f"Translation error: {error_type}")
+                                        raise ValueError(f"Translation error: {t.get('error', 'UNKNOWN_ERROR')}")
                                     translated_texts.append(t.get("translation", ""))
 
-                                if config.verbose:
-                                    print(
-                                        f"\n[translate_harmony_library] Parsed {len(translated_texts)} translation(s)")
-                                    for i, txt in enumerate(translated_texts):
-                                        print(f"[translate_harmony_library] Translation {i + 1}: {txt}\n")
-
+                                _log(config, "harmony-lib", f"Got {len(translated_texts)} translation(s)")
                                 result = translated_texts[0] if is_single else translated_texts
                                 return TranslationResult.from_translation_and_headers(result, response.headers, debug_data)
-                        except json.JSONDecodeError as je:
-                            if config.verbose:
-                                print(f"\n[translate_harmony_library] JSON decode error: {je}\n")
+                        except json.JSONDecodeError:
                             continue
 
-        error_msg = f"Could not parse translation from response. Content: {content[:300]}"
-        if config.verbose:
-            print(f"\n[translate_harmony_library] ERROR: {error_msg}\n")
-        raise ValueError(error_msg)
+        raise ValueError(f"Could not parse translation. Content: {content[:300]}")
 
     except Exception as e:
-        if config.verbose:
-            print(f"\n[translate_harmony_library] Exception: {e}\n")
+        _log(config, "harmony-lib", f"Error: {e}")
         raise
 
 
@@ -737,24 +695,23 @@ def translate_hunyuan(
     if not texts:
         raise ValueError("No texts provided")
 
-    # Extract target language name
-    target_lang_name = target_lang.split("(")[0].strip()
-
-    # Map to Hunyuan language name if available
-    hunyuan_target = HUNYUAN_LANG_MAP.get(target_lang_name, target_lang_name)
-
-    if config.verbose:
-        print(f"\n[translate_hunyuan] Translating {len(texts)} text(s) to {hunyuan_target}")
-        for i, t in enumerate(texts):
-            print(f"[translate_hunyuan] Input {i + 1}: {t}\n")
+    _log(config, "hunyuan", f"Translating {len(texts)} text(s) to {target_lang}")
 
     # Translate each text individually (Hunyuan-MT doesn't support batch in prompt)
     translations = []
     for idx, source_text in enumerate(texts):
-        # Determine if source is Chinese for prompt selection
-        is_chinese_source = any('\u4e00' <= c <= '\u9fff' for c in source_text[:100])
+        # Determine if source is Chinese (CJK chars but no Japanese kana)
+        sample = source_text[:100]
+        has_cjk = any('\u4e00' <= c <= '\u9fff' for c in sample)
+        has_kana = any('\u3040' <= c <= '\u30ff' for c in sample)  # Hiragana/Katakana
+        is_chinese_source = has_cjk and not has_kana
+        is_chinese_target = target_lang.lower().startswith("chinese") or "zh" in target_lang.lower()
+        use_chinese_prompt = is_chinese_source or is_chinese_target
 
-        if is_chinese_source or hunyuan_target == "中文":
+        # Get language name in appropriate form (Chinese or English)
+        hunyuan_target = get_hunyuan_lang(target_lang, use_chinese_prompt)
+
+        if use_chinese_prompt:
             # Use Chinese prompt for ZH<=>XX
             prompt = f"把下面的文本翻译成{hunyuan_target}，不要额外解释。\n{source_text}"
         else:
@@ -793,22 +750,14 @@ def translate_hunyuan(
             else:
                 debug_data = None
             
-            if config.verbose:
-                print(f"\n[translate_hunyuan] Raw response for text {idx + 1}: {content}\n")
-                if debug_data and idx == len(texts) - 1:
-                    print(f"\n[translate_hunyuan] Debug data: {json.dumps(debug_data, indent=2)}\n")
-
             if not content:
                 raise ValueError(f"Empty translation received for text {idx + 1}")
 
             translations.append(content)
-
-            if config.verbose:
-                print(f"[translate_hunyuan] Translation {idx + 1}: {content}\n")
+            _log(config, "hunyuan", f"Translation {idx + 1}: {content[:100]}...")
 
         except Exception as e:
-            if config.verbose:
-                print(f"\n[translate_hunyuan] Exception for text {idx + 1}: {e}\n")
+            _log(config, "hunyuan", f"Error for text {idx + 1}: {e}")
             raise
 
     # Return result with headers and debug data from the last response
@@ -859,16 +808,11 @@ def translate_raw(
         # Extract debug data from response if present
         debug_data = extract_debug_data(response_data, content)
 
-        if config.verbose:
-            print(f"\n[translate_raw] Raw response: {content}\n")
-            if debug_data:
-                print(f"\n[translate_raw] Debug data: {json.dumps(debug_data, indent=2)}\n")
-
+        _log(config, "raw", f"Response: {content[:200]}...")
         return TranslationResult.from_translation_and_headers(content, response.headers, debug_data)
 
     except Exception as e:
-        if config.verbose:
-            print(f"\n[translate_raw] Exception: {e}\n")
+        _log(config, "raw", f"Error: {e}")
         raise
 
 
@@ -885,10 +829,14 @@ def add_translate_args(parser, include_concurrency=False):
                         help='Request timeout in seconds')
     parser.add_argument('--azure', action='store_true',
                         help='Use Azure OpenAI endpoint')
-    parser.add_argument('--keep-alive', action='store_true',
-                        help='Use HTTP keep-alive (connection reuse)')
+    parser.add_argument('--azure-model', default='gpt-4.1-mini',
+                        help='Azure model name for cache key (default: gpt-4.1-mini)')
+    parser.add_argument('--no-keep-alive', action='store_true',
+                        help='Disable HTTP keep-alive (connection reuse)')
     parser.add_argument('--verbose', '-v', '--debug', action='store_true',
                         help='Verbose/debug output')
+    parser.add_argument('--description', type=str, default='',
+                        help='Description for cache key (e.g., "vllm-qwen3", "sglang-local")')
     if include_concurrency:
         parser.add_argument('--concurrency', type=int, default=1,
                             help='Number of concurrent requests')
@@ -903,7 +851,49 @@ def config_from_args(args) -> TranslateConfig:
         timeout=args.timeout,
         verbose=args.verbose,
         use_azure=args.azure,
-        keep_alive=args.keep_alive
+        keep_alive=not args.no_keep_alive,
+        description=args.description,
+        azure_model=args.azure_model
+    )
+
+
+def load_config_from_file(config_path: str) -> TranslateConfig:
+    """
+    Load TranslateConfig from an INI-style config file.
+    
+    Example config file:
+        [model]
+        endpoint = http://127.0.0.1:10000
+        model = Qwen/Qwen3-8B
+        prompt_format = roles
+        description = vllm-qwen3-8b
+        timeout = 40
+        azure = false
+        keep_alive = true
+    """
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"Config file not found: {config_path}")
+    
+    parser = configparser.ConfigParser()
+    parser.read(config_path)
+    
+    # Get section - use [model] or first section
+    section = 'model' if 'model' in parser.sections() else parser.sections()[0] if parser.sections() else None
+    if not section:
+        raise ValueError(f"Config file {config_path} has no sections. Expected [model] section.")
+    
+    cfg = parser[section]
+    
+    return TranslateConfig(
+        endpoint=cfg.get('endpoint', 'http://127.0.0.1:10000'),
+        model=cfg.get('model', 'Qwen/Qwen3-8B'),
+        prompt_format=cfg.get('prompt_format', 'roles'),
+        timeout=cfg.getint('timeout', 40),
+        verbose=cfg.getboolean('verbose', False),
+        use_azure=cfg.getboolean('azure', False),
+        keep_alive=cfg.getboolean('keep_alive', True),
+        description=cfg.get('description', None),
+        azure_model=cfg.get('azure_model', None),
     )
 
 

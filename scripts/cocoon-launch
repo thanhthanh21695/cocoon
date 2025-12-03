@@ -497,20 +497,36 @@ def run_client_local(cfg: Config):
     """Run client locally (connects to actual proxies)"""
     render_configs_local(cfg)
 
-    # Start router (SOCKS5 only, no reverse proxy)
-    router = f'{cfg.build_dir}/tee/router'
-    proxy_proc = popen([router, '-S', '8116@tdx', '--serialize-info'])
+    import threading
 
-    # Run client
+    def stream_output(proc, prefix, color_code):
+        """Read process output line by line and prefix each line"""
+        for line in proc.stdout:
+            print(f"\033[{color_code}m[{prefix}]\033[0m {line}", end='', flush=True)
+
+    # Start router (SOCKS5 only, no reverse proxy) with colored output
+    router = f'{cfg.build_dir}/tee/router'
+    router_proc = popen([router, '-S', '8116@tdx', '--serialize-info'],
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+    router_thread = threading.Thread(target=stream_output, args=(router_proc, 'ROUTER', '36'), daemon=True)
+    router_thread.start()
+
+    # Run client with colored output
     client_cmd = [f'{cfg.build_dir}/client-runner', '--config', f'{cfg.local_run_dir}/client-config.json', '-v3']
     if cfg.fake_ton:
         client_cmd += ['--disable-ton', f'{cfg.local_run_dir}/fake-ton-config.json']
 
-    print('Client command:', ' '.join(client_cmd))
+    client_proc = popen(client_cmd,
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+    client_thread = threading.Thread(target=stream_output, args=(client_proc, 'CLIENT', '33'), daemon=True)
+    client_thread.start()
+
     try:
-        os.execvp(client_cmd[0], client_cmd)
+        # Wait for client to finish
+        client_proc.wait()
     finally:
-        proxy_proc.terminate()
+        router_proc.terminate()
+        router_proc.wait()
 
 
 def run_qemu(cfg: Config):
