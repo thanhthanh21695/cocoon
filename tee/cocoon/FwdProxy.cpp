@@ -3,6 +3,7 @@
 #include "td/net/SslStream.h"
 #include "td/utils/BufferedFd.h"
 #include "td/utils/optional.h"
+#include "td/utils/format.h"
 #include "tdx.h"
 #include "utils.h"
 #include "td/net/Pipe.h"
@@ -15,6 +16,7 @@ struct Answer {
   td::SocketPipe src;
   td::SocketPipe dst;
   tdx::PolicyRef policy;
+  td::IPAddress destination;
 };
 
 class Socks5Init : public td::TaskActor<Answer> {
@@ -143,30 +145,30 @@ class Socks5Init : public td::TaskActor<Answer> {
     pipe_.input_buffer() = std::move(buf);
 
     td::int32 port = td::uint8(port_raw[0]) * 256 + td::uint8(port_raw[1]);
-    td::IPAddress ip_address;
-    TRY_STATUS(ip_address.init_host_port(host, port));
-    LOG(INFO) << "Connect " << ip_address;
-    TRY_RESULT(socket, td::SocketFd::open(ip_address));
-    TRY_STATUS(ip_address.init_socket_address(socket));
-    port = ip_address.get_port();
+    TRY_STATUS(destination_.init_host_port(host, port));
+    LOG(INFO) << "Connect " << destination_;
+    TRY_RESULT(socket, td::SocketFd::open(destination_));
+    td::IPAddress bound_address;
+    TRY_STATUS(bound_address.init_socket_address(socket));
+    auto bound_port = bound_address.get_port();
 
     td::string response;
     response += '\x05';
     response += '\x00';
     response += '\x00';
-    if (ip_address.is_ipv4()) {
+    if (bound_address.is_ipv4()) {
       response += '\x01';
-      auto ipv4 = ntohl(ip_address.get_ipv4());
+      auto ipv4 = ntohl(bound_address.get_ipv4());
       response += static_cast<char>(ipv4 & 255);
       response += static_cast<char>((ipv4 >> 8) & 255);
       response += static_cast<char>((ipv4 >> 16) & 255);
       response += static_cast<char>((ipv4 >> 24) & 255);
     } else {
       response += '\x04';
-      response += ip_address.get_ipv6();
+      response += bound_address.get_ipv6();
     }
-    response += static_cast<char>((port >> 8) & 255);
-    response += static_cast<char>(port & 255);
+    response += static_cast<char>((bound_port >> 8) & 255);
+    response += static_cast<char>(bound_port & 255);
 
     pipe_.output_buffer().append(response);
     dest_pipe_ = make_socket_pipe(std::move(socket));
@@ -216,6 +218,7 @@ class Socks5Init : public td::TaskActor<Answer> {
         .src = td::make_socket_pipe(std::move(pipe_socket)),
         .dst = std::move(dest_pipe_),
         .policy = std::move(policy_),
+        .destination = destination_,
     };
   }
 
@@ -224,43 +227,68 @@ class Socks5Init : public td::TaskActor<Answer> {
   td::SocketPipe pipe_;
   td::SocketPipe dest_pipe_;
   tdx::PolicyRef policy_;
+  td::IPAddress destination_;
 
   std::shared_ptr<const FwdProxy::Config> config_;
 };
 
 namespace {
-td::actor::Task<td::Unit> accept_and_proxy(td::SocketFd socket, std::shared_ptr<const FwdProxy::Config> config) {
-  td::SocketPipe left;
-  td::SocketPipe right;
-  tdx::PolicyRef policy;
-
-  if (config->skip_socks5) {
-    // Forward proxy mode: directly connect to fixed destination
-    left = make_socket_pipe(std::move(socket));
-    auto dest_socket = co_await td::SocketFd::open(config->fixed_destination_);
-    right = make_socket_pipe(std::move(dest_socket));
-    policy = co_await config->find_policy(config->default_policy_);
-  } else {
-    // SOCKS5 mode: negotiate destination via SOCKS5
-    auto ans = co_await td::spawn_task_actor<Socks5Init>("Socks5Init", make_socket_pipe(std::move(socket)), config);
-    left = std::move(ans.src);
-    right = std::move(ans.dst);
-    policy = std::move(ans.policy);
+struct AcceptAndProxy : td::TaskActor<ProxyState> {
+  AcceptAndProxy(td::SocketFd socket, std::shared_ptr<const FwdProxy::Config> config) : socket_(std::move(socket)), config_(std::move(config)) {
   }
+  td::actor::Task<Action> task_loop_once() override {
+    state_.init_source(socket_);
+    state_.update_state("Connecting");
 
-  // Solve PoW challenge from remote RevProxy (client always checks for magic)
-  right = co_await pow::solve_pow_client(std::move(right), config->max_pow_difficulty);
+    td::SocketPipe left;
+    td::SocketPipe right;
+    tdx::PolicyRef policy;
 
-  auto [tls_pipe, info] = co_await wrap_tls_client("-Fwd", std::move(right), config->cert_and_key_.load(), policy);
-  LOG(INFO) << "Fwd proxy: TLS handshake complete, " << (info.is_empty() ? "no attestation" : "attestation verified");
+    if (config_->skip_socks5) {
+      // Forward proxy mode: directly connect to fixed destination
+      state_.destination_ = config_->fixed_destination_;
+      left = make_socket_pipe(std::move(socket_));
+      auto dest_socket = co_await td::SocketFd::open(config_->fixed_destination_);
+      right = make_socket_pipe(std::move(dest_socket));
+      policy = co_await config_->find_policy(config_->default_policy_);
+    } else {
+      // SOCKS5 mode: negotiate destination via SOCKS5
+      state_.update_state("Socks5");
+      auto ans = co_await td::spawn_task_actor<Socks5Init>("Socks5Init", make_socket_pipe(std::move(socket_)), config_);
+      left = std::move(ans.src);
+      right = std::move(ans.dst);
+      policy = std::move(ans.policy);
+      state_.destination_ = ans.destination;
 
-  if (config->serialize_info) {
-    co_await framed_tl_write(left.output_buffer(), info);
+    }
+
+    auto desc = state_.short_desc();
+
+    // Solve PoW challenge from remote RevProxy (client always checks for magic)
+    state_.update_state("Pow");
+    right = co_await pow::solve_pow_client(std::move(right), config_->max_pow_difficulty);
+
+    state_.update_state("TlsHandshake");
+    auto [tls_pipe, info] = co_await wrap_tls_client("-Fwd-" + desc, std::move(right), config_->cert_and_key_.load(), policy);
+    state_.set_attestation(info);
+
+    if (config_->serialize_info) {
+      co_await framed_tl_write(left.output_buffer(), info);
+    }
+
+    state_.update_state("Proxying");
+    co_await proxy("-Fwd-" + desc, std::move(left), std::move(tls_pipe));
+    co_return Action::Finish;  // will move straight to finish
   }
-
-  co_await proxy("-Fwd", std::move(left), std::move(tls_pipe));
-  co_return td::Unit();
-}
+  td::actor::Task<ProxyState> finish(td::Status status) override {
+    state_.finish(std::move(status));
+    co_return std::move(state_);
+  }
+private:
+  td::SocketFd socket_;
+  std::shared_ptr<const FwdProxy::Config> config_;
+  ProxyState state_;
+};
 }  // namespace
 
 td::Result<tdx::PolicyRef> FwdProxy::Config::find_policy(td::Slice username) const {
@@ -278,7 +306,7 @@ void FwdProxy::start_up() {
     explicit Callback(std::shared_ptr<const Config> config) : config_(std::move(config)) {
     }
     void accept(td::SocketFd fd) override {
-      accept_and_proxy(std::move(fd), config_).start().detach();
+      td::actor::spawn_task_actor<AcceptAndProxy>("Fwd", std::move(fd), config_).detach_silent();
     }
   };
   listener_ = td::actor::create_actor<td::TcpInfiniteListener>("Listener", config_->port_,

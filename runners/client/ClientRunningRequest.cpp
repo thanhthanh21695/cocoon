@@ -40,7 +40,7 @@ void ClientRunningRequest::on_payload_downloaded(td::BufferSlice payload) {
   LOG(DEBUG) << "client request " << request_id_.to_hex() << ": downloaded payload, size=" << payload.size();
   stats()->request_bytes_received += (double)payload.size();
   std::string model = "test1";
-  td::int32 max_coefficient = 1000;
+  td::int32 max_coefficient = 4000;
   td::int32 max_tokens = 1000;
   //max_tokens = 0;
   //max_coefficient = 0;

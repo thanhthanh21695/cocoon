@@ -213,7 +213,7 @@ int main(int argc, char** argv) {
 
   sched.run_in_context([&] {
     cocoon::HealthClient::Config config{.cid_ = cid, .port_ = vsock_port, .request_ = request};
-    td::spawn_task_actor<cocoon::HealthClient>("HealthClient", std::move(config)).detach();
+    td::spawn_task_actor<cocoon::HealthClient>("HealthClient", std::move(config)).detach("HealthClient");
   });
 
   sched.start();

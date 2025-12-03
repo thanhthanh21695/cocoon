@@ -313,7 +313,7 @@ void BaseRunner::initialize_rpc_server(td::Promise<td::Unit> promise) {
   promise.set_value(td::Unit());
 }
 void BaseRunner::rpc_server_initialized() {
-  coro_init().start().detach();
+  coro_init().start().detach("BaseRunner::coro_init");
 }
 
 td::actor::Task<td::Unit> BaseRunner::try_run_initialization_task(td::Slice name, td::actor::Task<td::Unit> task) {
@@ -642,7 +642,7 @@ void BaseRunner::alarm() {
   if (is_initialized() && next_root_contract_state_update_at_.is_in_past() && !root_contract_state_updating_ &&
       !ton_disabled()) {
     next_root_contract_state_update_at_ = td::Timestamp::in(td::Random::fast(30.0, 60.0));
-    update_root_contract_state().start().detach();
+    update_root_contract_state().start().detach("update_root_contract_state");
   }
   alarm_timestamp() = td::Timestamp::in(td::Random::fast(1.0, 2.0));
   alarm_timestamp().relax(next_monitor_at_);

@@ -59,7 +59,7 @@ int main(int argc, char **argv) {
 
   sched.run_in_context([&] {
     // Create proxy actors for each configured port
-    check_task(run(host, port, fake_tdx)).start().detach();
+    check_task(run(host, port, fake_tdx)).start().detach("check_task");
   });
 
   LOG(INFO) << "Proxies started";

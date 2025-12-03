@@ -163,4 +163,16 @@ td::actor::Task<std::pair<td::Pipe, tdx::AttestationData>> wrap_tls_server(td::S
   auto tls_pipe = co_await ask(proxy, &TlsPipeWorker::extract_fd);
   co_return std::make_pair(std::move(tls_pipe), info);
 }
+
+td::StringBuilder &operator<<(td::StringBuilder &sb, const ProxyState &state) {
+  sb << state.state_;
+  if (state.finished_) {
+    sb << " [finished]";
+  }
+  sb << " " << state.short_desc();
+  if (state.status.is_error()) {
+    sb << " " << state.status;
+  }
+  return sb;
+}
 }  // namespace cocoon

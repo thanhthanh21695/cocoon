@@ -4,13 +4,18 @@
 #include "td/utils/buffer.h"
 #include "td/utils/BufferedFd.h"
 #include "td/utils/port/SocketFd.h"
+#include "td/utils/port/IPAddress.h"
 #include "td/utils/Status.h"
+#include "td/utils/StringBuilder.h"
+#include "td/utils/format.h"
+#include "td/utils/logging.h"
 #include "td/utils/tl_helpers.h"
 #include "td/utils/optional.h"
 #include "td/actor/coro_task.h"
 #include "td/net/FramedPipe.h"
 #include "td/net/Pipe.h"
 #include "td/net/utils.h"
+#include <string>
 
 namespace td {
 class SslStream;
@@ -83,5 +88,66 @@ td::actor::Task<std::pair<td::Pipe, tdx::AttestationData>> wrap_tls_client(td::S
 td::actor::Task<std::pair<td::Pipe, tdx::AttestationData>> wrap_tls_server(td::Slice name, td::Pipe pipe,
                                                                            tdx::CertAndKey cert_and_key,
                                                                            tdx::PolicyRef policy);
+
+struct ProxyState {
+  std::string state_ = "Connecting";
+  td::optional<td::IPAddress> source_;
+  td::optional<td::IPAddress> destination_;
+  std::string attestation_;  // short image hash or empty
+  bool finished_ = false;
+  td::Status status;
+
+  std::string short_desc() const {
+    std::string desc;
+    if (source_) {
+      desc += PSTRING() << source_.value().get_ip_str() << ":" << source_.value().get_port();
+    } else {
+      desc += "?";
+    }
+    desc += " -> ";
+    if (destination_) {
+      desc += PSTRING() << destination_.value().get_ip_str() << ":" << destination_.value().get_port();
+    } else {
+      desc += "?";
+    }
+    if (!attestation_.empty()) {
+      desc += " [" + attestation_ + "]";
+    }
+    return desc;
+  }
+
+  void set_attestation(const tdx::AttestationData &info) {
+    if (info.is_empty()) {
+      attestation_ = "";
+    } else {
+      auto hash = info.image_hash();
+      attestation_ = td::hex_encode(hash.as_slice()).substr(0, 8) + "..";
+    }
+  }
+
+  void init_source(const td::SocketFd &socket) {
+    td::IPAddress source_addr;
+    if (source_addr.init_peer_address(socket).is_ok()) {
+      source_ = source_addr;
+    }
+  }
+
+  void update_state(td::Slice new_state) {
+    state_ = new_state.str();
+    LOG(INFO) << *this;
+  }
+
+  void finish(td::Status st) {
+    finished_ = true;
+    status = std::move(st);
+    if (status.is_error()) {
+      LOG(ERROR) << *this;
+    } else {
+      LOG(INFO) << *this;
+    }
+  }
+};
+
+td::StringBuilder &operator<<(td::StringBuilder &sb, const ProxyState &state);
 
 }  // namespace cocoon

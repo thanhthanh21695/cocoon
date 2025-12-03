@@ -337,7 +337,7 @@ td::actor::Task<td::Unit> base_test() {
 TEST(Cocoon, Base) {
   int threads_n = 2;
   td::actor::Scheduler sched({threads_n});
-  sched.run_in_context([&] { ensure_task(base_test()).start().detach(); });
+  sched.run_in_context([&] { ensure_task(base_test()).start().detach_silent(); });
   while (sched.run(10)) {
     // empty
   }

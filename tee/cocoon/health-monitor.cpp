@@ -378,7 +378,7 @@ class Server final : public td::actor::Actor {
       void accept(td::SocketFd fd) override {
         auto pipe = td::make_socket_pipe(std::move(fd));
         // Get the LATEST stats from Server
-        td::spawn_task_actor<Worker>("HealthWorker", std::move(pipe), *stats_ptr_).detach();
+        td::spawn_task_actor<Worker>("HealthWorker", std::move(pipe), *stats_ptr_).detach("worker");
       }
     };
 

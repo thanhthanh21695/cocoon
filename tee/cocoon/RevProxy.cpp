@@ -7,6 +7,7 @@
 #include "td/net/SslStream.h"
 #include "td/utils/BufferedFd.h"
 #include "td/utils/optional.h"
+#include "td/utils/format.h"
 #include "tdx.h"
 #include "utils.h"
 #include "td/net/Pipe.h"
@@ -15,25 +16,50 @@
 
 namespace cocoon {
 namespace {
-td::Task<td::Unit> accept_and_proxy(td::SocketFd socket, std::shared_ptr<const RevProxy::Config> config) {
-  td::SocketPipe client_pipe = td::make_socket_pipe(std::move(socket));
-
-  // Verify PoW from incoming client (always enabled)
-  client_pipe = co_await pow::verify_pow_server(std::move(client_pipe), config->pow_difficulty);
-
-  auto [tls_socket, info] =
-      co_await wrap_tls_server("-Rev", std::move(client_pipe), config->cert_and_key_.load(), config->policy_);
-  LOG(INFO) << "Rev proxy: TLS handshake complete, " << (info.is_empty() ? "no attestation" : "attestation verified");
-  auto dst_pipe = make_socket_pipe(co_await td::SocketFd::open(config->dst_));
-
-  if (config->serialize_info) {
-    co_await framed_tl_write(dst_pipe.output_buffer(), info);
+struct AcceptAndProxy : td::TaskActor<ProxyState> {
+  AcceptAndProxy(td::SocketFd socket, std::shared_ptr<const RevProxy::Config> config)
+      : socket_(std::move(socket)), config_(std::move(config)) {
   }
 
-  auto r_status = co_await proxy("-Rev", std::move(tls_socket), std::move(dst_pipe)).wrap();
-  LOG_IF(INFO, r_status.is_error()) << "Rev proxy: connection closed with error: " << r_status.error();
-  co_return td::Unit();
-}
+  td::actor::Task<Action> task_loop_once() override {
+    state_.init_source(socket_);
+    state_.destination_ = config_->dst_;
+    state_.update_state("Connecting");
+
+    auto desc = state_.short_desc();
+
+    td::SocketPipe client_pipe = td::make_socket_pipe(std::move(socket_));
+
+    // Verify PoW from incoming client (always enabled)
+    state_.update_state("Pow");
+    client_pipe = co_await pow::verify_pow_server(std::move(client_pipe), config_->pow_difficulty);
+
+    state_.update_state("TlsHandshake");
+    auto [tls_socket, info] =
+        co_await wrap_tls_server("-Rev-" + desc, std::move(client_pipe), config_->cert_and_key_.load(), config_->policy_);
+    state_.set_attestation(info);
+
+    auto dst_pipe = make_socket_pipe(co_await td::SocketFd::open(config_->dst_));
+
+    if (config_->serialize_info) {
+      co_await framed_tl_write(dst_pipe.output_buffer(), info);
+    }
+
+    state_.update_state("Proxying");
+    co_await proxy("-Rev-" + desc, std::move(tls_socket), std::move(dst_pipe));
+    co_return Action::Finish;
+  }
+
+  td::actor::Task<ProxyState> finish(td::Status status) override {
+    state_.finish(std::move(status));
+    co_return std::move(state_);
+  }
+
+ private:
+  td::SocketFd socket_;
+  std::shared_ptr<const RevProxy::Config> config_;
+  ProxyState state_;
+};
 }  // namespace
 
 void RevProxy::start_up() {
@@ -42,7 +68,7 @@ void RevProxy::start_up() {
     explicit Callback(std::shared_ptr<const Config> config) : config_(std::move(config)) {
     }
     void accept(td::SocketFd fd) override {
-      accept_and_proxy(std::move(fd), config_).start().detach();
+      td::actor::spawn_task_actor<AcceptAndProxy>("Rev", std::move(fd), config_).detach_silent();
     }
   };
   listener_ = td::actor::create_actor<td::TcpInfiniteListener>("Listener", config_->src_port_,
