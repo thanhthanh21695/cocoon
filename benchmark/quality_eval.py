@@ -33,6 +33,7 @@ except ImportError:
 
 # COMET - neural metric (optional but recommended)
 COMET_MODEL = None  # Global cache for COMET model
+COMET_MODEL_NAME = None  # Track which model is loaded
 try:
     from comet import download_model, load_from_checkpoint
     COMET_AVAILABLE = True
@@ -41,12 +42,25 @@ except ImportError:
     print("Note: COMET not available. Install with: pip install unbabel-comet")
     print("      COMET gives better semantic evaluation than BLEU.\n")
 
+# Available COMET models
+COMET_MODELS = {
+    "wmt22": "Unbabel/wmt22-comet-da",           # Default, fast
+    "xcomet-xl": "Unbabel/XCOMET-XL",            # Better quality
+    "xcomet-xxl": "Unbabel/XCOMET-XXL",          # Best quality, requires more VRAM
+}
 
-def get_comet_model():
+
+def get_comet_model(model_name: str = "wmt22"):
     """Load COMET model once and cache it."""
-    global COMET_MODEL
+    global COMET_MODEL, COMET_MODEL_NAME
+    
+    # If different model requested, reload
+    if COMET_MODEL is not None and COMET_MODEL_NAME != model_name:
+        COMET_MODEL = None
+    
     if COMET_MODEL is None and COMET_AVAILABLE:
-        print("Loading COMET model (one-time)...")
+        model_id = COMET_MODELS.get(model_name, model_name)  # Allow direct model ID too
+        print(f"Loading COMET model: {model_id} (one-time)...")
         import warnings
         import logging
         # Suppress noisy warnings
@@ -54,9 +68,10 @@ def get_comet_model():
         logging.getLogger("torch").setLevel(logging.ERROR)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            model_path = download_model("Unbabel/wmt22-comet-da")
+            model_path = download_model(model_id)
             COMET_MODEL = load_from_checkpoint(model_path)
-        print("COMET model loaded.\n")
+        COMET_MODEL_NAME = model_name
+        print(f"COMET model loaded: {model_name}\n")
     return COMET_MODEL
 
 
@@ -466,7 +481,8 @@ def evaluate_batch(
     config: TranslateConfig,
     num_samples: int = 100,
     concurrency: int = 1,
-    verbose: bool = False
+    verbose: bool = False,
+    comet_model: str = "wmt22"
 ) -> List[EvalResult]:
     """
     Batch evaluation: load all data, translate all, evaluate all.
@@ -579,16 +595,16 @@ def evaluate_batch(
     
     # Calculate COMET for ALL samples at once
     comet_scores_all = None
-    comet_model = get_comet_model()
-    if comet_model is not None and all_successful:
-        print(f"\nCalculating COMET for {len(all_successful)} samples (single batch)...")
+    comet_model_instance = get_comet_model(comet_model)
+    if comet_model_instance is not None and all_successful:
+        print(f"\nCalculating COMET ({comet_model}) for {len(all_successful)} samples...")
         try:
             comet_data = [
                 {"src": s.source, "mt": s.hypothesis, "ref": s.reference}
                 for s in all_successful
             ]
             gpus = 1 if has_gpu() else 0
-            comet_output = comet_model.predict(comet_data, batch_size=32, gpus=gpus, progress_bar=True)
+            comet_output = comet_model_instance.predict(comet_data, batch_size=32, gpus=gpus, progress_bar=True)
             comet_scores_all = comet_output.scores
             print(f"COMET calculation complete.")
         except Exception as e:
@@ -803,20 +819,24 @@ def print_summary(results: List[EvalResult], title: str = "SUMMARY"):
     print(f"{'='*85}\n")
 
 
-def _format_with_diff(val: float, vals: list, higher_is_better: bool, fmt: str = ".4f") -> str:
-    """Format value with diff from best, colored green if best, red if worst."""
+def _format_with_diff(val: float, vals: list, higher_is_better: bool, width: int = 14) -> str:
+    """Format value with diff from best as %, colored green if best, red if worst. Fixed width."""
     best = max(vals) if higher_is_better else min(vals)
     worst = min(vals) if higher_is_better else max(vals)
-    diff = val - best if higher_is_better else best - val  # Always show as negative diff from best
     
     if val == best:
-        formatted = f"{val:{fmt}}"
-        return f"\033[92m{formatted}\033[0m"  # Green, no diff needed
+        # Best value - green, no diff
+        text = f"{val:.2f}"
+        padded = text.rjust(width)
+        return f"\033[92m{padded}\033[0m"
     else:
-        formatted = f"{val:{fmt}} ({diff:+.2f})"
+        # Other values - show diff as percentage
+        diff_pct = ((val - best) / best) * 100 if best != 0 else 0
+        text = f"{val:.2f} ({diff_pct:+.1f}%)"
+        padded = text.rjust(width)
         if val == worst:
-            return f"\033[91m{formatted}\033[0m"  # Red
-        return formatted
+            return f"\033[91m{padded}\033[0m"
+        return padded
 
 
 def print_comparison(all_results: Dict[str, List[EvalResult]]):
@@ -859,25 +879,30 @@ def print_comparison(all_results: Dict[str, List[EvalResult]]):
     time_table = df.pivot_table(index='pair', columns='model', values='time', aggfunc='mean')[names]
     error_table = df.pivot_table(index='pair', columns='model', values='errors', aggfunc='sum')[names]
     
-    # Column width - needs space for diff like "0.8955 (-0.01)"
-    col_w = max(18, max(len(n) for n in names) + 2)
-    err_w = max(8, max(len(n) for n in names) + 2)  # Same width for consistency
+    # Column widths based on model names
+    col_w = max(14, max(len(n) for n in names) + 2)  # For score with diff like "0.89 (-1.2%)"
+    time_w = 8  # For time
+    err_w = 4   # For error count
+    pair_w = 14  # For pair with cumulative %
     
-    print(f"\n{'='*140}")
+    # Short labels for error columns only
+    short_err = [f"e{i+1}" for i in range(len(names))]
+    
+    print(f"\n{'='*120}")
     print(f"COMPARISON: {' vs '.join(names)}")
-    print(f"{'='*140}")
+    # Legend for error columns
+    err_legend = ", ".join(f"e{i+1}={n}" for i, n in enumerate(names))
+    print(f"Errors: {err_legend}")
+    print(f"{'='*120}")
     
-    # Column width for pair (includes cumulative %)
-    pair_w = 18
-    
-    # Header with model names - score, time, errors columns
+    # Header - full names for score/time, short for errors
     header = f"{'Pair':<{pair_w}}"
     for name in names:
         header += f" {name:>{col_w}}"
     for name in names:
-        header += f" {name+' t':>{col_w}}"
-    for name in names:
-        header += f" {name+' err':>{err_w}}"
+        header += f" {(name[:5]+'t'):>{time_w}}"  # Truncated name + t
+    for se in short_err:
+        header += f" {se:>{err_w}}"
     print(header)
     
     # Subheader with metric labels
@@ -885,7 +910,7 @@ def print_comparison(all_results: Dict[str, List[EvalResult]]):
     for _ in names:
         subheader += f" {metric:>{col_w}}"
     for _ in names:
-        subheader += f" {'(sec)':>{col_w}}"
+        subheader += f" {'sec':>{time_w}}"
     for _ in names:
         subheader += f" {'':>{err_w}}"
     print(subheader)
@@ -902,16 +927,20 @@ def print_comparison(all_results: Dict[str, List[EvalResult]]):
         # Show cumulative percentage if available
         cum_pct = _PAIR_CUMULATIVE_PCT.get(pair)
         if cum_pct is not None:
-            pair_display = f"{pair} ({cum_pct:.0f}%)"
+            pair_display = f"{pair}({cum_pct:.0f}%)"
         else:
             pair_display = pair
-        row = f"{pair_display:<18}"
+        row = f"{pair_display:<{pair_w}}"
         for s in scores:
-            row += f" {_format_with_diff(s, scores, True):>{col_w + 9}}"  # +9 for ANSI
+            row += f" {_format_with_diff(s, scores, True, col_w)}"
         for t in times:
-            row += f" {_format_with_diff(t, times, False, '.2f'):>{col_w + 9}}"
+            # Simpler time format without diff
+            best_t = min(times)
+            if t == best_t:
+                row += f" \033[92m{t:>{time_w}.2f}\033[0m"
+            else:
+                row += f" {t:>{time_w}.2f}"
         for e in errors:
-            # Red if errors, no color if 0
             if e > 0:
                 row += f" \033[91m{e:>{err_w}}\033[0m"
             else:
@@ -926,9 +955,13 @@ def print_comparison(all_results: Dict[str, List[EvalResult]]):
     
     row = f"{'AVERAGE':<{pair_w}}"
     for s in avg_scores:
-        row += f" {_format_with_diff(s, avg_scores, True):>{col_w + 9}}"
+        row += f" {_format_with_diff(s, avg_scores, True, col_w)}"
     for t in avg_times:
-        row += f" {_format_with_diff(t, avg_times, False, '.2f'):>{col_w + 9}}"
+        best_t = min(avg_times)
+        if t == best_t:
+            row += f" \033[92m{t:>{time_w}.2f}\033[0m"
+        else:
+            row += f" {t:>{time_w}.2f}"
     for e in total_errors:
         if e > 0:
             row += f" \033[91m{e:>{err_w}}\033[0m"
@@ -936,8 +969,8 @@ def print_comparison(all_results: Dict[str, List[EvalResult]]):
             row += f" {e:>{err_w}}"
     print(row)
     
-    print(f"{'='*140}")
-    print("\033[92mGreen\033[0m = Best, \033[91mRed\033[0m = Worst/Errors, (diff from best)")
+    print(f"{'='*100}")
+    print("\033[92mGreen\033[0m = Best, \033[91mRed\033[0m = Worst/Errors")
 
 
 def run_evaluation(
@@ -946,7 +979,8 @@ def run_evaluation(
     num_samples: int,
     concurrency: int,
     verbose: bool,
-    label: str = ""
+    label: str = "",
+    comet_model: str = "wmt22"
 ) -> List[EvalResult]:
     """Run batch evaluation on all pairs and return results."""
     if label:
@@ -968,7 +1002,8 @@ def run_evaluation(
         config=config,
         num_samples=num_samples,
         concurrency=concurrency,
-        verbose=verbose
+        verbose=verbose,
+        comet_model=comet_model
     )
 
 
@@ -1021,6 +1056,9 @@ Config file format (INI):
                         help='Translation cache file (duckdb format)')
     parser.add_argument('--no-cache', action='store_true',
                         help='Disable translation caching')
+    parser.add_argument('--comet-model', type=str, default='wmt22',
+                        choices=['wmt22', 'xcomet-xl', 'xcomet-xxl'],
+                        help='COMET model: wmt22 (fast), xcomet-xl (better), xcomet-xxl (best, needs GPU)')
     
     args = parser.parse_args()
     
@@ -1083,7 +1121,8 @@ Config file format (INI):
         results = run_evaluation(
             pairs, config,
             args.num_samples, args.concurrency, args.verbose,
-            label=name
+            label=name,
+            comet_model=args.comet_model
         )
         all_results[name] = results
         if results:
