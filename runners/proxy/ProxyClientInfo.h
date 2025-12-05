@@ -75,7 +75,7 @@ class ProxyClientInfo : public std::enable_shared_from_this<ProxyClientInfo> {
     }
   }
   auto tokens_ready_to_charge() const {
-    return tokens_committed_to_blockchain() - exp_sc_tokens_used_;
+    return std::max<td::int64>(0, tokens_committed_to_blockchain() - exp_sc_tokens_used_);
   }
   auto tokens_max_to_charge() const {
     return tokens_max() - sc_tokens_used_;
