@@ -1,6 +1,7 @@
 #pragma once
 #include "tdx.h"
 #include "td/actor/actor.h"
+#include "td/utils/as.h"
 #include "td/utils/buffer.h"
 #include "td/utils/BufferedFd.h"
 #include "td/utils/port/SocketFd.h"
@@ -20,7 +21,30 @@
 namespace td {
 class SslStream;
 }  // namespace td
+
 namespace cocoon {
+
+// Binary slice helpers - convert slice to typed value
+template <class T, class TT = T>
+td::Result<TT> to(td::Slice s) {
+  if (s.size() != sizeof(T)) {
+    return td::Status::Error(PSLICE() << "Size mismatch in to(): got " << s.size() << " bytes, expected " << sizeof(T));
+  }
+  T result = td::as<T>(s.ubegin());
+  return result;
+}
+
+// Binary slice helpers - read and consume typed value from slice
+template <class T, class TT = T>
+td::Result<TT> cut(td::Slice& s) {
+  if (s.size() < sizeof(T)) {
+    return td::Status::Error(PSLICE() << "Insufficient data in cut(): got " << s.size() << " bytes, need at least "
+                                      << sizeof(T));
+  }
+  T result = td::as<T>(s.ubegin());
+  s.remove_prefix(sizeof(T));
+  return result;
+}
 struct AttestedPeerInfo;
 // Create a server-side SSL stream using provided cert/key and policy verification
 td::Result<td::SslStream> create_server_ssl_stream(tdx::CertAndKey cert_and_key, tdx::PolicyRef policy);

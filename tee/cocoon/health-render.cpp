@@ -5,6 +5,7 @@
  */
 
 #include "health-render.h"
+#include "tdx-eventlog.h"
 #include "td/utils/logging.h"
 #include "td/utils/algorithm.h"
 #include "td/utils/misc.h"
@@ -141,6 +142,10 @@ std::string read_rtmr(int index) {
   std::string value = r.move_as_ok();
   value.erase(value.find_last_not_of(" \n\r\t") + 1);
   return td::hex_encode(value);
+}
+
+std::string get_event_log() {
+  return tdx_eventlog::render_event_log();
 }
 
 std::string get_status() {

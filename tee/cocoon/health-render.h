@@ -32,6 +32,7 @@ std::string render_all_status();
 
 namespace render_tdx {
 std::string get_status();
+std::string get_event_log();
 }
 
 namespace render_gpu {

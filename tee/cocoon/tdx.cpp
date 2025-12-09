@@ -2,8 +2,8 @@
 
 #include "cocoon/openssl_utils.h"
 #include "cocoon/tdx.h"
+#include "cocoon/utils.h"
 #include "cocoon/AttestationCache.h"
-#include "td/utils/as.h"
 #include "td/utils/misc.h"
 #include "td/utils/filesystem.h"
 #include "td/utils/format.h"
@@ -56,6 +56,9 @@ td::StringBuilder &operator<<(td::StringBuilder &sb, const std::array<T, N> &val
 }  // namespace td
 
 namespace tdx {
+using cocoon::cut;
+using cocoon::to;
+
 td::StringBuilder &operator<<(td::StringBuilder &sb, const TdxAttestationData &data) {
   sb << "TDX attestation data\n";
   auto p = [&](td::Slice name, auto value) {
@@ -579,26 +582,6 @@ struct SgxQuoteBody {
 #pragma pack(pop)
 
 using QuoteBody = td::Variant<TdxQuoteBody10, TdxQuoteBody15, SgxQuoteBody>;
-
-template <class T, class TT = T>
-td::Result<TT> to(td::Slice s) {
-  if (s.size() != sizeof(T)) {
-    return td::Status::Error(PSLICE() << "Size mismatch in to(): got " << s.size() << " bytes, expected " << sizeof(T));
-  }
-  T result = td::as<T>(s.ubegin());
-  return result;
-}
-
-template <class T, class TT = T>
-td::Result<TT> cut(td::Slice &s) {
-  if (s.size() < sizeof(T)) {
-    return td::Status::Error(PSLICE() << "Insufficient data in cut(): got " << s.size() << " bytes, need at least "
-                                      << sizeof(T));
-  }
-  T result = td::as<T>(s.ubegin());
-  s.remove_prefix(sizeof(T));
-  return result;
-}
 
 td::Result<QuoteBody> tdx_quote_to_body(td::Slice quote) {
   // Validate minimum quote size

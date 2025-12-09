@@ -108,6 +108,7 @@ add_executable(health-monitor EXCLUDE_FROM_ALL
   ${CMAKE_CURRENT_SOURCE_DIR}/cocoon/health-metrics.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/cocoon/health-stats.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/cocoon/health-render.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/cocoon/tdx-eventlog.cpp
 )
 target_link_libraries(health-monitor PRIVATE cocoon tdutils tdnet_ported tdactor git)
 

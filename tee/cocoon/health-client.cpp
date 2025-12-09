@@ -158,6 +158,7 @@ int main(int argc, char** argv) {
     LOG(PLAIN) << "  svc <service>               - Get detailed service info with recent logs";
     LOG(PLAIN) << "  logs <service> [lines]      - Get service logs (default 100 lines)";
     LOG(PLAIN) << "  tdx                         - Get TDX attestation status (image hash + RTMRs)";
+    LOG(PLAIN) << "  eventlog                    - Get TDX event log (CCEL ACPI table) with RTMR replay";
     LOG(PLAIN) << "  gpu                         - Get GPU metrics (utilization, memory, temp, power)";
     LOG(PLAIN) << "  all                         - Get all metrics in one view";
     LOG(PLAIN) << "";
@@ -174,6 +175,7 @@ int main(int argc, char** argv) {
     LOG(PLAIN) << "  " << argv[0] << " -i worker:3 sys";
     LOG(PLAIN) << "  " << argv[0] << " -i worker gpu";
     LOG(PLAIN) << "  " << argv[0] << " -i worker tdx";
+    LOG(PLAIN) << "  " << argv[0] << " -i worker eventlog";
     LOG(PLAIN) << "  " << argv[0] << " -i worker svc cocoon-vllm";
     LOG(PLAIN) << "  " << argv[0] << " -i proxy:2 logs cocoon-vllm 200";
     LOG(PLAIN) << "  " << argv[0] << " -i worker all";

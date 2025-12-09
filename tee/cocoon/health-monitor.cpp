@@ -244,6 +244,10 @@ td::Result<std::string> tdx_cmd(std::istringstream&, const StatsCollector&) {
   return render_tdx::get_status();
 }
 
+td::Result<std::string> tdx_eventlog(std::istringstream&, const StatsCollector&) {
+  return render_tdx::get_event_log();
+}
+
 td::Result<std::string> gpu(std::istringstream&, const StatsCollector&) {
   return render_gpu::get_metrics();
 }
@@ -279,15 +283,16 @@ td::Result<std::string> process_request(const std::string& request, const StatsC
   // Dispatch table
   using Handler = td::Result<std::string> (*)(std::istringstream&, const StatsCollector&);
   static const std::map<std::string, Handler> dispatch = {
-      {"status", handlers::status}, {"logs", handlers::logs}, {"sys", handlers::sys}, {"svc", handlers::svc},
-      {"tdx", handlers::tdx_cmd},   {"gpu", handlers::gpu},   {"all", handlers::all}};
+      {"status", handlers::status}, {"logs", handlers::logs},         {"sys", handlers::sys},
+      {"svc", handlers::svc},       {"tdx", handlers::tdx_cmd},       {"gpu", handlers::gpu},
+      {"all", handlers::all},       {"eventlog", handlers::tdx_eventlog}};
 
   auto it = dispatch.find(command);
   if (it != dispatch.end()) {
     return it->second(iss, stats);
   }
 
-  return td::Status::Error("Unknown command. Available: status, logs, sys, svc, tdx, gpu, all");
+  return td::Status::Error("Unknown command. Available: status, logs, sys, svc, tdx, eventlog, gpu, all");
 }
 
 // ============================================================================
