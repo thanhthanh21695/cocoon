@@ -83,6 +83,17 @@ clientRunner.config
   ton_config_filename:string
   http_access_hash:string = clientRunner.Config;
 
+keyStorageRunner.config
+  is_test:Bool
+  is_testnet:Bool
+  http_port:int
+  connect_to_proxy_via:string
+  root_contract_address:string
+  check_proxy_hashes:Bool
+  root_contract_private_key:string
+  ton_config_filename:string
+  http_access_hash:string = keyStorageRunner.Config;
+
 rootConfig.registeredProxy seqno:int address:string = rootConfig.RegisteredProxy;
 
 rootConfig.pseudo proxy_hashes:(vector int256) worker_hashes:(vector int256) model_hashes:(vector int256) model_types:(vector string)

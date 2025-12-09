@@ -87,6 +87,13 @@ struct SimpleJsonSerializer {
   void add_value(td::Slice value) {
     sb << "\"" << value << "\"";
   }
+  void add_value(const char *value) {
+    sb << "\"" << td::CSlice(value) << "\"";
+  }
+  template <size_t N>
+  void add_value(const char value[N]) {
+    sb << "\"" << td::Slice(value, N) << "\"";
+  }
 
   void add_element(td::Slice name, auto value) {
     print_comma();
