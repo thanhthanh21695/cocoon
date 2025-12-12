@@ -205,6 +205,7 @@ class TranslationCache:
 
 # Global cache instance
 _TRANSLATION_CACHE: Optional[TranslationCache] = None
+_CACHE_REWRITE_MODE: bool = False
 
 def get_translation_cache(cache_path: str = "translation_cache.parquet", enabled: bool = True) -> TranslationCache:
     """Get or create global translation cache."""
@@ -217,9 +218,10 @@ def get_translation_cache(cache_path: str = "translation_cache.parquet", enabled
     return _TRANSLATION_CACHE
 
 
-def init_cache(cache_path: str, enabled: bool = True):
+def init_cache(cache_path: str, enabled: bool = True, rewrite: bool = False):
     """Initialize the global cache with specific settings."""
-    global _TRANSLATION_CACHE
+    global _TRANSLATION_CACHE, _CACHE_REWRITE_MODE
+    _CACHE_REWRITE_MODE = rewrite
     if enabled and cache_path:
         _TRANSLATION_CACHE = TranslationCache(cache_path)
     else:
@@ -510,13 +512,14 @@ def evaluate_batch(
         
         target_lang_name = LANG_NAMES.get(tgt_lang, f"{tgt_lang}")
         
-        # Check cache first (debug for first 3 lookups)
-        debug_cache = (task_idx < 3)
-        cached = cache.get(sample.source, target_lang_name, config, debug=debug_cache)
-        if cached:
-            sample.hypothesis, sample.duration = cached
-            print(f"{model_tag}[{task_idx+1}/{total_samples}] {pair_label} ⚡ CACHED ({sample.duration:.2f}s) | {len(sample.source)} chars")
-            return
+        # Check cache first (debug for first 3 lookups), skip if rewrite mode
+        if not _CACHE_REWRITE_MODE:
+            debug_cache = (task_idx < 3)
+            cached = cache.get(sample.source, target_lang_name, config, debug=debug_cache)
+            if cached:
+                sample.hypothesis, sample.duration = cached
+                print(f"{model_tag}[{task_idx+1}/{total_samples}] {pair_label} ⚡ CACHED ({sample.duration:.2f}s) | {len(sample.source)} chars")
+                return
         
         t0 = time.time()
         try:
@@ -960,6 +963,8 @@ Config file format (INI):
                         help='Translation cache file (duckdb format)')
     parser.add_argument('--no-cache', action='store_true',
                         help='Disable translation caching')
+    parser.add_argument('--rewrite-cache', action='store_true',
+                        help='Ignore cached results and rewrite them (still saves to cache)')
     parser.add_argument('--comet-model', type=str, default='wmt22',
                         choices=['wmt22', 'xcomet-xl', 'xcomet-xxl'],
                         help='COMET model: wmt22 (fast), xcomet-xl (better), xcomet-xxl (best, needs GPU)')
@@ -967,7 +972,7 @@ Config file format (INI):
     args = parser.parse_args()
     
     # Initialize cache
-    init_cache(args.cache, enabled=not args.no_cache)
+    init_cache(args.cache, enabled=not args.no_cache, rewrite=args.rewrite_cache)
     
     # Determine language pairs
     global _PAIR_CUMULATIVE_PCT
