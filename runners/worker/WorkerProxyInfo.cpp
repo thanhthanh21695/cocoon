@@ -100,8 +100,8 @@ ClientCheckResult WorkerProxyInfo::check() {
   /* if request_is_running() == false we can assume, that exp_sc_tokens_processed has the correct value */
   auto delta = to_payout();
 
-  bool is_outdated =
-      sc()->runner_config()->root_contract_config->version() < runner->runner_config()->root_contract_config->version();
+  bool is_outdated = sc()->runner_config()->root_contract_config->params_version() <
+                     runner->runner_config()->root_contract_config->params_version();
 
   if (is_outdated) {
     auto waiting_for = time_since_close_started();
